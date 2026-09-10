@@ -80,6 +80,9 @@ static struct {
 static void bcp_stop(void);
 static void bcp_teardown(bool user_closed);
 static void bcp_set_topmost(HWND frame, bool on);
+
+/* menu-qt.cpp: top-level button in the OBS menu bar (Qt lives in C++) */
+extern void bcp_add_menubar_button(void *main_window, void (*callback)(void *), void *private_data);
 static void open_context_menu(HWND hwnd, POINT pt);
 
 /* master mix tap: OBS converts to interleaved float stereo 48 kHz for us */
@@ -1747,6 +1750,10 @@ static void frontend_event(enum obs_frontend_event event, void *private_data)
 	UNUSED_PARAMETER(private_data);
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING: {
+		/* top-level "BackCast Window" button in the OBS menu bar —
+		 * easier to find than a Tools submenu entry */
+		bcp_add_menubar_button(obs_frontend_get_main_window(), tools_toggle, NULL);
+
 		/* reopen only if it was open when OBS was closed */
 		obs_data_t *cfg = cfg_load();
 		bool open = cfg_get_bool(cfg, "open", false);
@@ -1765,7 +1772,6 @@ static void frontend_event(enum obs_frontend_event event, void *private_data)
 
 bool obs_module_load(void)
 {
-	obs_frontend_add_tools_menu_item(obs_module_text("Tools.ToggleWindow"), tools_toggle, NULL);
 	obs_frontend_add_event_callback(frontend_event, NULL);
 	obs_hotkey_register_frontend("Backcast.ToggleWindow",
 				     obs_module_text("Hotkey.ToggleWindow"),

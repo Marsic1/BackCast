@@ -34,7 +34,7 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/audio-out.c src/backcast.rc)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/audio-out.c src/menu-qt.cpp src/backcast.rc)
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE user32 gdi32 ole32 dwmapi uxtheme psapi winmm avrt)
