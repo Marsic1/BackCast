@@ -18,11 +18,12 @@ public sealed class MpvPlayer : IDisposable
     private const ulong UdCoreIdle = 1;
     private const ulong UdEof = 2;
     private const ulong UdPausedForCache = 3;
+    private const ulong UdAspect = 5;
     private const ulong UdTimePos = 4;
 
     // watchdog tuning (per spec)
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromMilliseconds(500);
-    private static readonly TimeSpan NoDataThreshold = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan NoDataThreshold = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(2);
     // time-pos must tick at least this often to count as advancing (60 fps stream)
     private static readonly TimeSpan PositionAlive = TimeSpan.FromMilliseconds(1200);
@@ -52,6 +53,9 @@ public sealed class MpvPlayer : IDisposable
     /// <summary>Fires on background threads. state + human-readable detail.</summary>
     public event Action<PlaybackState, string>? StateChanged;
 
+    /// <summary>Stream aspect ratio (w/h) when it changes — resolution/aspect changes from OBS.</summary>
+    public event Action<double>? StreamAspectChanged;
+
     public PlaybackState State { get { lock (_stateLock) return _state; } }
 
     public MpvPlayer(IntPtr videoHandle, string streamUrl, IReadOnlyList<string> extraOptions)
@@ -80,6 +84,7 @@ public sealed class MpvPlayer : IDisposable
             Log.Write($"observe failed: core-idle rc={rc1} time-pos rc={rc2}");
         Mpv.ObserveProperty(_ctx, UdEof, "eof-reached", Mpv.FormatFlag);
         Mpv.ObserveProperty(_ctx, UdPausedForCache, "paused-for-cache", Mpv.FormatFlag);
+        Mpv.ObserveProperty(_ctx, UdAspect, "video-params/aspect", Mpv.FormatDouble);
         _startUtc = DateTime.UtcNow;
 
         _running = true;
@@ -92,15 +97,29 @@ public sealed class MpvPlayer : IDisposable
     private void ApplyOptions()
     {
         SetOpt("wid", VideoHandle.ToInt64().ToString());
-        // low-latency chain: the profile shrinks the demuxer readahead; the
-        // hacks trim VO-side buffering; a short audio buffer trades ~70 ms
-        // of default safety margin for conversational latency; nobuffer
-        // stops libavformat from queueing packets on arrival.
+        // low-latency, but not to the point of starvation: the previous
+        // setup (nobuffer + 50ms audio + reorder_queue_size=0) starved the
+        // demuxer on the relay path — time-pos ticked only in 2s bursts,
+        // which the watchdog read as "no data" and reloaded every 2s,
+        // restarting the probe cycle forever (observed as ~2s+ latency and
+        // relay connection churn). Keep the profile + framedrop, drop the
+        // starvation options.
         SetOpt("profile", "low-latency");
-        SetOpt("video-latency-hacks", "yes");
-        SetOpt("audio-buffer", "0.05");
-        // don't let the decoder wait on reordered frames (OBS B-frames)
-        SetOpt("vd-lavc-o", "flags=low_delay");
+        // audio pacing adds up to one audio-buffer of video delay (video
+        // waits for its synced audio frame): 33 ms is the practical floor
+        SetOpt("audio-buffer", "0.033");
+        // A SMALL demuxer cache (not none): with cache=no any network
+        // jitter starves the decoder and, combined with display-desync,
+        // froze the picture while time-pos kept ticking (watchdog blinded).
+        // The readahead/hysteresis pair is the steady-state live-edge lag:
+        // the demuxer keeps ~readahead+hysteresis buffered ahead of the
+        // display point, so keep both as small as jitter tolerance allows.
+        // 0.2 + 0.1 absorbs momentary gaps without a visible half-second.
+        SetOpt("cache", "yes");
+        SetOpt("demuxer-readahead-secs", "0.2");
+        SetOpt("demuxer-hysteresis-secs", "0.1");
+        SetOpt("demuxer-max-bytes", "15728640");   // 15 MiB hard cap
+        SetOpt("demuxer-max-back-bytes", "2097152"); // 2 MiB back-buffer
         SetOpt("hwdec", "auto-safe");
         SetOpt("network-timeout", "5");
         SetOpt("framedrop", "vo");
@@ -109,19 +128,17 @@ public sealed class MpvPlayer : IDisposable
         SetOpt("input-default-bindings", "no");
         SetOpt("input-vo-keyboard", "no");
 
-        // Fast start. The spec's probesize=32768 is far too small for a
-        // 6 Mbps 1080p60 TS (~40 ms of data — the demuxer can't even reach
-        // the first keyframe and loadfile fails immediately, end-file
-        // reason=4). 5 MB probes in ~1 s and decodes reliably.
-        // NOTE: key=value list options are COMMA-separated in mpv; the spec's
-        // colon syntax produces one garbage value and the open fails.
-        // probesize/analyzeduration affect start-up analysis only; the
-        // steady-state latency comes from the options above.
-        string lavf = "probesize=5000000,analyzeduration=2000000,fflags=nobuffer";
+        // Probe SMALL: on a live stream the probe amount becomes permanent
+        // latency — the demuxer buffers that much stream before the first
+        // frame, and live RTSP/UDP has no history to catch up with (5 MB at
+        // ~5 Mbps measured as 12.5 s start delay and a permanently lagging
+        // player). 512 KB ≈ 1 s of stream: enough to reach the first keyframe
+        // with a 1 s GOP (the spec's 32 KB could not, which is why its
+        // loadfile failed), with analyzeduration capped at 500 ms.
+        // NOTE: key=value list options are COMMA-separated in mpv.
+        string lavf = "probesize=512000,analyzeduration=500000";
         if (StreamUrl.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
-            // reorder_queue_size=0: the RTSP demuxer parks interleaved
-            // packets in a reorder buffer by default (up to 500 packets)
-            lavf += ",rtsp_transport=tcp,reorder_queue_size=0";
+            lavf += ",rtsp_transport=tcp";
         SetOpt("demuxer-lavf-o", lavf);
 
         foreach (string opt in ExtraOptions)
@@ -278,6 +295,13 @@ public sealed class MpvPlayer : IDisposable
                     break;
                 case UdPausedForCache:
                     // not needed for the v1 state machine, but cheap to keep
+                    break;
+                case UdAspect:
+                    if (prop.Format == Mpv.FormatDouble)
+                    {
+                        double aspect = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(prop.Data));
+                        if (aspect > 0.1) StreamAspectChanged?.Invoke(aspect);
+                    }
                     break;
                 case UdTimePos:
                     if (prop.Format == Mpv.FormatDouble)

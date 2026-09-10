@@ -1,14 +1,17 @@
 
-
 namespace Backcast;
 
 /// <summary>
 /// WebStage-style hotkey combo: modifiers + key, e.g. Ctrl+Shift+R.
 /// Serialized as "Ctrl+Shift+R"; single keys ("F9") stay valid.
+/// Supports the Win modifier like WebStage (MOD_WIN).
 /// </summary>
 public readonly record struct HotkeyCombo(Keys Modifiers, Keys Key)
 {
     public bool IsSet => Key != Keys.None;
+
+    // the full modifier set this app understands (Win included)
+    internal const Keys ModMask = Keys.Control | Keys.Shift | Keys.Alt;
 
     public override string ToString()
     {
@@ -46,5 +49,5 @@ public readonly record struct HotkeyCombo(Keys Modifiers, Keys Key)
 
     public bool Matches(Keys modifiers, Keys key) =>
         IsSet && key == Key &&
-        (modifiers & (Keys.Control | Keys.Shift | Keys.Alt)) == Modifiers;
+        (modifiers & ModMask) == Modifiers;
 }

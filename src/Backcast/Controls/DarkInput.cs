@@ -12,7 +12,15 @@ internal sealed class DarkInput : Control
     public bool ReadOnly
     {
         get => _inner.ReadOnly;
-        set { _inner.ReadOnly = value; }
+        set
+        {
+            _inner.ReadOnly = value;
+            // the native textbox must match the ring it sits in: read-only
+            // fields paint the outer panel Bg (dimmed) — keep the inner box
+            // in sync or it shows as a lighter rectangle inside the ring
+            _inner.BackColor = value ? Theme.Bg : Theme.BgEdit;
+            Invalidate();
+        }
     }
 
     public bool Multiline

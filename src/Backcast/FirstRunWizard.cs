@@ -108,11 +108,12 @@ internal sealed class FirstRunWizard : Form
         // ---- card 1: direct ----
         _directCard = new OptionCard
         {
-            Title = "Direct",
-            Subtitle = "Simplest — recommended",
+            Title = "Direct  (UDP)  —  ★ RECOMMENDED",
+            Subtitle = "Lowest latency — works with OBS AND with Aitum Multistream",
             Badge = "1",
             Description =
-                "Works with OBS's normal Stream button. Paste this into OBS → Settings → Stream →\nCustom server (the key can be anything):",
+                "OBS's Stream button or an Aitum Custom destination can both send here directly — no relay hop, lowest latency. "
+                + "Paste this as the server (OBS → Settings → Stream → Custom, or Aitum → Custom destination; the key can be anything):",
             Url = _settings.ObsUrl,
         };
         _directCard.IsSelected = true;
@@ -125,11 +126,12 @@ internal sealed class FirstRunWizard : Form
         // ---- card 2: relay ----
         _relayCard = new OptionCard
         {
-            Title = "Relay",
-            Subtitle = "If you use the Aitum Multistream plugin",
+            Title = "Relay  (RTMP)",
+            Subtitle = "Alternative — if UDP is blocked in your setup",
             Badge = "2",
             Description =
-                "Aitum destinations are RTMP-only, so a tiny local relay converts the feed (downloaded below,\nstarted automatically). In Aitum Multistream add a destination: Custom RTMP, this server, key \"discord\":",
+                "Same picture, but through a tiny local relay (downloaded below, started automatically) — adds about a second. "
+                + "In OBS or Aitum Multistream, add a destination with this server and the key \"discord\":",
             Url = $"rtmp://127.0.0.1:1935/{_settings.RtmpPath}",
             Extra = BuildRelayExtra(),
         };
@@ -142,7 +144,11 @@ internal sealed class FirstRunWizard : Form
     /// <summary>The relay card's extra content: download button + status.</summary>
     private Control BuildRelayExtra()
     {
-        Panel row = new() { AutoSize = false, Height = 40, BackColor = Color.Transparent };
+        // the row sits on the option card (BgPanel): give the row the SAME
+        // BackColor, not Transparent — simulated transparency samples the
+        // immediate parent, and a Transparent child renders white-cornered
+        // artifacts where the rounded button clips against it
+        Panel row = new() { AutoSize = false, Height = 40, BackColor = Theme.BgPanel };
         var download = new DarkButton { Text = "Download relay  (one-time)", Size = new Size(214, 32), Location = new Point(18, 0) };
         var status = new Label
         {

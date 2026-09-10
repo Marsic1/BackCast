@@ -32,6 +32,9 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon _tray;
     private readonly System.Windows.Forms.Timer _relayFollow = new() { Interval = 2000 };
     private string? _activeRelayPath;
+    // clean-share mode: while LIVE the header is hidden so a Discord window
+    // share shows only the picture (the taskbar/title still carries status)
+    private bool _cleanShare = true;
 
     // WM_NCHITTEST results for the borderless window
     private const int HTCLIENT = 1, HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11,
@@ -53,6 +56,7 @@ internal sealed class MainForm : Form
         _settings = settings;
 
         Text = "Backcast";
+        Icon = LoadEmbeddedIcon();
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         BackColor = Theme.Bg;
@@ -143,24 +147,27 @@ internal sealed class MainForm : Form
         _statusCard.Controls.Add(_statusLabel);
         _statusCard.Controls.Add(_hintLabel);
 
-        // dock order matters: Fill first added = bottom z; header last =
-        // top z, always visible and clickable above the video surface
+        // dock order = layout order: Top FIRST so the Fill panel is laid
+        // out BELOW the header (video starts under it, not behind it — the
+        // top of the video used to be cut). Fill still z-sits above the
+        // video surface for clicks, header stays topmost via BringToFront.
+        Controls.Add(_header);
         Controls.Add(_videoPanel);
         Controls.Add(_statusCard);
-        Controls.Add(_header);
         _header.BringToFront();
 
         // ---- tray (WebStage-style) ----
         _tray = new NotifyIcon
         {
             Text = "Backcast",
-            Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!)
+            Icon = LoadEmbeddedIcon() ?? Icon.ExtractAssociatedIcon(Environment.ProcessPath!)
                    ?? SystemIcons.Application,
             Visible = true,
         };
         _tray.ContextMenuStrip = BuildTrayMenu();
         _tray.DoubleClick += (_, _) => ShowFromTray();
 
+        WatchTopEdge();
         Load += OnLoad;
         _relayFollow.Tick += (_, _) => FollowPublishedPath();
         FormClosing += OnFormClosing;
@@ -169,10 +176,30 @@ internal sealed class MainForm : Form
         ResizeEnd += (_, _) => SaveBounds();
     }
 
+    /// <summary>
+    /// The embedded multi-size app.ico (16-256px): the tray, titlebar and
+    /// taskbar each get the right size instead of a stretched 32px
+    /// ExtractAssociatedIcon image.
+    /// </summary>
+    private static Icon? LoadEmbeddedIcon()
+    {
+        try
+        {
+            using var stream = typeof(MainForm).Assembly
+                .GetManifestResourceStream("Backcast.app.ico");
+            return stream == null ? null : new Icon(stream);
+        }
+        catch
+        {
+            return null; // fall back to the exe icon
+        }
+    }
+
     private void OnLoad(object? sender, EventArgs e)
     {
         Theme.SetRoundedCorners(Handle, 8);
         OnResize(EventArgs.Empty); // buttons + title laid out before first paint
+        ApplyHotkeys();
         if (_settings.Window.Maximized) WindowState = FormWindowState.Maximized;
         CreatePlayer();
 
@@ -250,6 +277,35 @@ internal sealed class MainForm : Form
             SetState(PlaybackState.Waiting);
     }
 
+    /// <summary>
+    /// Adapts the window shape when the OBS canvas aspect changes (e.g.
+    /// 16:9 → vertical): keep the window's AREA, adjust w/h to the new
+    /// aspect, clamp to screen. Skipped when maximized (user's choice wins)
+    /// and only when the aspect actually differs meaningfully — this never
+    /// fights ordinary manual resizes.
+    /// </summary>
+    private double _lastFitAspect;
+    private void FitWindowToStream(double aspect)
+    {
+        if (WindowState == FormWindowState.Maximized) return;
+        if (Math.Abs(aspect - _lastFitAspect) < 0.02) return;
+        _lastFitAspect = aspect;
+
+        int area = Width * Height;
+        int newW = (int)Math.Round(Math.Sqrt(area * aspect));
+        int newH = (int)Math.Round(Math.Sqrt(area / aspect));
+
+        var screen = Screen.FromControl(this).WorkingArea;
+        newW = Math.Min(newW, screen.Width);
+        newH = Math.Min(newH, screen.Height);
+        if (newW < MinimumSize.Width) newW = MinimumSize.Width;
+        if (newH < MinimumSize.Height) newH = MinimumSize.Height;
+
+        int x = Math.Clamp(Location.X, screen.X, screen.Right - newW);
+        int y = Math.Clamp(Location.Y, screen.Y, screen.Bottom - newH);
+        SetBounds(x, y, newW, newH);
+    }
+
     /// <summary>Exact device from the wizard/settings, else hint match, else default.</summary>
     private void ApplyAudioDevice()
     {
@@ -306,6 +362,7 @@ internal sealed class MainForm : Form
                 Text = $"🔴 {_settings.DisplayName} — LIVE · Backcast";
                 _tray.Text = "Backcast — LIVE";
                 _statusCard.Visible = false;
+                ApplyCleanShare(true);
                 // mpv renders into a NATIVE child window that sits above any
                 // WinForms control — the only way to show the waiting card is
                 // to hide the video panel itself while there's no picture
@@ -313,6 +370,7 @@ internal sealed class MainForm : Form
                 break;
             case PlaybackState.Error:
                 Text = $"❌ {_settings.DisplayName} — Backcast";
+                ApplyCleanShare(false);
                 _tray.Text = "Backcast — error";
                 _statusLabel.Text = "Playback error";
                 _hintLabel.Text = detail.Length > 0 ? detail : "Reload (F9) or check the OBS setup in Settings.";
@@ -321,6 +379,7 @@ internal sealed class MainForm : Form
             default:
                 Text = $"⏳ {_settings.DisplayName} — waiting for OBS";
                 _tray.Text = "Backcast — waiting for OBS";
+                ApplyCleanShare(false);
                 _statusLabel.Text = "Waiting for OBS stream…";
                 _hintLabel.Text = detail.Length > 0 ? detail :
                     (_audioHintPending
@@ -329,6 +388,95 @@ internal sealed class MainForm : Form
                 ShowStatusCard();
                 break;
         }
+    }
+
+    /// <summary>
+    /// Clean share: hide the header while LIVE so a Discord window share
+    /// contains only the video. Moving the mouse to the top edge reveals it
+    /// transiently (buttons stay reachable mid-stream).
+    /// </summary>
+    private void ApplyCleanShare(bool live)
+    {
+        if (!_cleanShare)
+        {
+            SetHeaderShown(true);
+            return;
+        }
+        SetHeaderShown(!live);
+    }
+
+    /// <summary>
+    /// Visibility alone doesn't help: a hidden DOCKED control still reserves
+    /// its layout strip, leaving a dead band at the top of the share. Toggle
+    /// the header's dock participation instead.
+    /// </summary>
+    private void SetHeaderShown(bool shown)
+    {
+        if (_headerShown == shown) return;
+        _headerShown = shown;
+        _header.Visible = shown;
+        // detach from layout when hidden so Fill expands to the full window
+        if (shown)
+        {
+            _header.Dock = DockStyle.Top;
+            _header.BringToFront();
+        }
+        else
+        {
+            _headerPeeked = false;
+            _header.Dock = DockStyle.None;
+            _header.SendToBack();
+        }
+        PerformLayout();
+    }
+
+    private bool _headerShown = true;
+    // While LIVE the native mpv child window owns the entire client area —
+    // the form never sees WM_MOUSEMOVE, and no WinForms control can be
+    // transparent over a native sibling (an overlay would paint a solid
+    // band over the video). Poll the GLOBAL cursor position instead: it is
+    // valid regardless of which window is under the mouse.
+    private const int HoverZoneHeight = 100;
+    private readonly System.Windows.Forms.Timer _mousePoll = new() { Interval = 60 };
+    private readonly System.Windows.Forms.Timer _rehide = new() { Interval = 500 };
+    private bool _headerPeeked;
+
+    private void WatchTopEdge()
+    {
+        _mousePoll.Tick += (_, _) => PollTopEdge();
+        _rehide.Tick += (_, _) =>
+        {
+            _rehide.Stop();
+            if (_pill.State != PlaybackState.Live || !_headerPeeked) return;
+            if (!CursorInHoverZone()) { _headerPeeked = false; SetHeaderShown(false); }
+        };
+        _mousePoll.Start();
+    }
+
+    private void PollTopEdge()
+    {
+        if (WindowState == FormWindowState.Minimized) return;
+        if (CursorInHoverZone())
+        {
+            if (!_headerShown)
+            {
+                _headerPeeked = true;
+                _rehide.Stop();
+                SetHeaderShown(true);
+            }
+        }
+        else if (_headerPeeked && _headerShown)
+        {
+            // grace so a quick dip below the zone doesn't flicker the header
+            if (!_rehide.Enabled) _rehide.Start();
+        }
+    }
+
+    private bool CursorInHoverZone()
+    {
+        var pt = PointToClient(Cursor.Position);
+        return pt.X >= 0 && pt.X <= ClientSize.Width
+            && pt.Y >= 0 && pt.Y <= HoverZoneHeight;
     }
 
     private void ShowStatusCard()
@@ -400,6 +548,14 @@ internal sealed class MainForm : Form
     /// <summary>Borderless hit test: edges resize, header drags, body is client.</summary>
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == WM_HOTKEY)
+        {
+            switch (m.WParam.ToInt32())
+            {
+                case HkReload: ReloadPlayer(); return;
+                case HkTopmost: ToggleTopmost(); return;
+            }
+        }
         const int WM_NCHITTEST = 0x84;
         if (m.Msg == WM_NCHITTEST && WindowState == FormWindowState.Normal)
         {
@@ -503,20 +659,75 @@ internal sealed class MainForm : Form
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
-        if (MatchesHotkey(e, _settings.Hotkeys.Reload))
+        // hotkeys are GLOBAL (RegisterHotKey, WebStage-style) — they fire via
+        // WM_HOTKEY even when the native mpv child holds focus. This in-form
+        // path is only a fallback for when registration failed (combo already
+        // in use by another app).
+        if (!_hotkeysRegistered)
         {
-            ReloadPlayer();
-            e.Handled = true;
-        }
-        else if (MatchesHotkey(e, _settings.Hotkeys.ToggleTopmost))
-        {
-            ToggleTopmost();
-            e.Handled = true;
+            if (MatchesHotkey(e, _settings.Hotkeys.Reload))
+            {
+                ReloadPlayer();
+                e.Handled = true;
+            }
+            else if (MatchesHotkey(e, _settings.Hotkeys.ToggleTopmost))
+            {
+                ToggleTopmost();
+                e.Handled = true;
+            }
         }
     }
 
     private static bool MatchesHotkey(KeyEventArgs e, string hotkey) =>
         HotkeyCombo.Parse(hotkey).Matches(e.Modifiers, e.KeyCode);
+
+    // ---- global hotkeys (WebStage: RegisterHotKey + WM_HOTKEY) ----
+
+    private const int HkReload = 1, HkTopmost = 2;
+    private bool _hotkeysRegistered;
+
+    [DllImport("user32.dll")]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    private const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4,
+        MOD_NOREPEAT = 0x4000;
+    private const int WM_HOTKEY = 0x0312;
+
+    /// <summary>
+    /// (Re)register global hotkeys from settings. WebStage behavior: a combo
+    /// already owned by another app logs a line and is skipped (the in-form
+    /// KeyDown fallback still covers it while our window has focus).
+    /// </summary>
+    private void ApplyHotkeys()
+    {
+        if (IsDisposed) return;
+        if (_hotkeysRegistered)
+        {
+            UnregisterHotKey(Handle, HkReload);
+            UnregisterHotKey(Handle, HkTopmost);
+            _hotkeysRegistered = false;
+        }
+        if (!IsHandleCreated) return;
+
+        _hotkeysRegistered = true;
+        foreach (var (id, spec) in new[] { (HkReload, _settings.Hotkeys.Reload), (HkTopmost, _settings.Hotkeys.ToggleTopmost) })
+        {
+            var hk = HotkeyCombo.Parse(spec);
+            if (!hk.IsSet) continue;
+            uint mods = (hk.Modifiers.HasFlag(Keys.Control) ? MOD_CONTROL : 0)
+                      | (hk.Modifiers.HasFlag(Keys.Shift) ? MOD_SHIFT : 0)
+                      | (hk.Modifiers.HasFlag(Keys.Alt) ? MOD_ALT : 0)
+                      | MOD_NOREPEAT;
+            if (!RegisterHotKey(Handle, id, mods, (uint)hk.Key))
+            {
+                _hotkeysRegistered = false;
+                Log.Write($"hotkey '{hk}' registration failed (already in use?) — in-window fallback active");
+            }
+        }
+    }
 
     private void OpenSettings()
     {
@@ -524,6 +735,8 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _settings.Save();
+            // hotkeys may have changed: re-register globals before restart
+            ApplyHotkeys();
             // transport/port/audio changes: restart player (and the relay)
             _player?.Dispose();
             _player = null;
@@ -559,7 +772,11 @@ internal sealed class MainForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         SaveBounds();
+        UnregisterHotKey(Handle, HkReload);
+        UnregisterHotKey(Handle, HkTopmost);
         _relayFollow.Stop();
+        _mousePoll.Stop();
+        _rehide.Stop();
         _player?.Dispose();
         MediaMtx.Stop();
         _tray.Visible = false;

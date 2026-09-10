@@ -32,4 +32,10 @@
     <Content Include="libmpv\libmpv-2.dll" CopyToOutputDirectory="PreserveNewest" Link="libmpv-2.dll" />
   </ItemGroup>
 
+  <!-- multi-size app icon: exe icon (taskbar/Alt-Tab) + embedded resource
+       so the tray/titlebar can pick the right size instead of a stretched 32px -->
+  <ItemGroup>
+    <EmbeddedResource Include="app.ico" />
+  </ItemGroup>
+
 </Project>

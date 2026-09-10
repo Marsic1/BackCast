@@ -80,6 +80,9 @@ internal sealed class SettingsForm : Form
         KeyPreview = true;
         KeyDown += (_, e) =>
         {
+            // Esc cancels an in-progress hotkey capture FIRST — closing the
+            // window mid-capture loses the keystroke (WebStage dialog rule)
+            if (_reloadKey.IsCapturing || _topmostKey.IsCapturing) return;
             if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); e.Handled = true; }
         };
 
@@ -299,9 +302,28 @@ internal sealed class SettingsForm : Form
         RowLabel(ref y, "Reload hotkey");
         Place(_reloadKey, y - RowH - 10, 150);
         _reloadKey.Combo = HotkeyCombo.Parse(_settings.Hotkeys.Reload);
+        AddHotkeyResetButton(ref y, _reloadKey, "F9");
         RowLabel(ref y, "Always-on-top hotkey");
         Place(_topmostKey, y - RowH - 10, 150);
         _topmostKey.Combo = HotkeyCombo.Parse(_settings.Hotkeys.ToggleTopmost);
+        AddHotkeyResetButton(ref y, _topmostKey, "F10");
+    }
+
+    /// <summary>Small "Reset" chip right of a hotkey box — restores the default combo.</summary>
+    private void AddHotkeyResetButton(ref int y, HotkeyBox box, string defaultCombo)
+    {
+        var reset = new DarkButton
+        {
+            Text = "Reset",
+            Size = new Size(70, RowH),
+            Location = new Point(InputX + 160, y - RowH),
+        };
+        reset.Click += (_, _) =>
+        {
+            box.Combo = HotkeyCombo.Parse(defaultCombo);
+            box.Invalidate();
+        };
+        Controls.Add(reset);
     }
 
     private void BuildAdvanced(ref int y)

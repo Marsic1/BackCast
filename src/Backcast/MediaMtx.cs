@@ -14,6 +14,9 @@ internal static class MediaMtx
     private const string Repo = "bluenviron/mediamtx";
 
     private static Process? _proc;
+    private static bool _adopted;
+    private static System.Windows.Forms.Timer? _adoptWatcher;
+    private static string RelayLogPath => Path.Combine(Dir, "relay.log");
 
     public static string Dir => Path.Combine(AppSettings.DirectoryPath, "mediamtx");
     public static string ExePath => Path.Combine(Dir, "mediamtx.exe");
@@ -136,13 +139,18 @@ internal static class MediaMtx
         if (!IsDownloaded) return false;
 
         // A relay from a previous app session can outlive the app. Its output
-        // pipe belongs to the dead parent, so we can't watch its paths —
-        // kill it and start our own to keep the path-follow pipeline alive.
+        // pipe belongs to the dead parent, so we can't watch its paths — but
+        // it IS still serving any actively-publishing OBS: killing it breaks
+        // a live stream (OBS holds a dead socket and never auto-reconnects).
+        // Instead: keep the old relay running and let the app adopt it via
+        // the on-disk relay log (paths are parsed from the same log lines,
+        // written by every relay instance regardless of parent).
         if (RelayIsAlive())
         {
-            Log.Write("mediamtx: taking over an already-running relay");
-            KillOrphans();
-            Thread.Sleep(400); // let the ports free up
+            Log.Write("mediamtx: adopting an already-running relay (not restarting it)");
+            _adopted = true;
+            StartAdoptWatcher();
+            return true;
         }
 
         try
@@ -161,6 +169,11 @@ internal static class MediaMtx
             if (_proc == null) return false;
             _proc.OutputDataReceived += OnRelayLine;
             _proc.ErrorDataReceived += OnRelayLine;
+            // mirror to relay.log: future app sessions adopt an orphan
+            // relay by tailing this file (our pipe dies with us)
+            try { File.WriteAllText(RelayLogPath, ""); } catch { }
+            _proc.OutputDataReceived += (_, e2) => TryMirror(e2?.Data);
+            _proc.ErrorDataReceived += (_, e2) => TryMirror(e2?.Data);
             _proc.BeginOutputReadLine();
             _proc.BeginErrorReadLine();
 
@@ -218,8 +231,52 @@ internal static class MediaMtx
         catch { }
     }
 
+    private static void TryMirror(string? line)
+    {
+        if (string.IsNullOrEmpty(line)) return;
+        try { File.AppendAllText(RelayLogPath, line + Environment.NewLine); } catch { }
+    }
+
+    /// <summary>
+    /// Tails relay.log for an adopted (not-ours) relay: same path parsing as
+    /// the pipe watcher, fed from the file.
+    /// </summary>
+    private static void StartAdoptWatcher()
+    {
+        _adoptWatcher = new System.Windows.Forms.Timer { Interval = 2000 };
+        _adoptWatcher.Tick += (_, _) =>
+        {
+            try
+            {
+                if (!File.Exists(RelayLogPath)) return;
+                foreach (string line in File.ReadLines(RelayLogPath))
+                    ParsePublishedPath(line);
+            }
+            catch { /* log locked/rotating */ }
+        };
+        _adoptWatcher.Start();
+    }
+
+    private static void ParsePublishedPath(string? line)
+    {
+        if (string.IsNullOrEmpty(line)) return;
+        const string marker = "is publishing to path '";
+        int idx = line.IndexOf(marker, StringComparison.Ordinal);
+        if (idx >= 0)
+        {
+            int start = idx + marker.Length;
+            int end = line.IndexOf("'", start);
+            if (end > start)
+                LatestPublishedPath = line[start..end];
+        }
+    }
+
     public static void Stop()
     {
+        _adoptWatcher?.Stop();
+        // an adopted relay is NOT ours: leave it running so an actively
+        // publishing OBS keeps its connection across app restarts
+        if (_adopted) return;
         try
         {
             if (IsRunning) _proc!.Kill(true);
