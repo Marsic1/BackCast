@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+src/Backcast/libmpv/
+auto.crt
+auto.key
+*.crt
+*.key
