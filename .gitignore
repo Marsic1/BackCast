@@ -7,3 +7,6 @@ auto.crt
 auto.key
 *.crt
 *.key
+plugin/build_x64/
+plugin/.deps/
+plugin/build*/

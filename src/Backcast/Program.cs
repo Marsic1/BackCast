@@ -50,7 +50,7 @@ internal static class Program
         // surface the detail — a bare "object reference" teaches nobody anything
         _ = MessageBox.Show(
             $"Something went wrong:\n\n{ex.GetType().Name}: {ex.Message}\n\nDetails were written to %TEMP%\\Backcast.log",
-            "Backcast", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     private static void FocusExistingInstance()

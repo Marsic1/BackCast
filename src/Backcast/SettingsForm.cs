@@ -3,116 +3,223 @@ using Backcast.Controls;
 namespace Backcast;
 
 /// <summary>
-/// Settings window — WebStage layout: wide (580px), section headers with
-/// divider rules, rounded DarkInput fields, generous spacing.
+/// Settings for the plugin architecture: OBS install (repair/uninstall),
+/// audio endpoint (written to the plugin's config), and pointers to the
+/// hotkeys that now live in OBS itself.
 /// </summary>
 internal sealed class SettingsForm : Form
 {
+    private const int RowH = 34, Edge = 24, LabelX = 24, InputX = 190, InputW = 440;
+
     private readonly AppSettings _settings;
-    private readonly MpvPlayer? _player;
+    private PluginInstaller.ObsInstall? _obs;
 
-    private readonly DarkCombo _transport = new();
-    private readonly DarkNumber _udpPort = new();
-    private readonly DarkInput _rtmpPath = new();
-    private readonly DarkInput _obsUrl = new() { ReadOnly = true, ValueColor = Theme.Accent };
-    private readonly DarkButton _copyUrl = new() { Text = "Copy", Size = new Size(80, 32) };
-    private readonly DarkButton _relayDownload = new() { Text = "Download relay", Size = new Size(150, 32) };
-    private readonly Label _relayStatus = new();
+    private readonly Label _obsValue = new();
+    private readonly DarkButton _repairButton = new() { Text = "Repair install", Size = new Size(130, 32) };
+    private readonly DarkButton _uninstallButton = new() { Text = "Uninstall", Size = new Size(100, 32) };
 
-    private readonly DarkCombo _audioMode = new();
     private readonly DarkCombo _deviceList = new();
     private readonly DarkButton _refreshDevices = new() { Text = "Refresh", Size = new Size(90, 32) };
+    private readonly DarkButton _autoButton = new() { Text = "Auto", Size = new Size(70, 32) };
     private readonly DarkButton _installCable = new() { Text = "Install VB-Cable", Size = new Size(150, 32) };
 
-    private readonly DarkInput _displayName = new();
-    private readonly CheckBox _autoStart = new() { Text = "Start playing automatically on launch" };
-    private readonly CheckBox _onTop = new() { Text = "Always on top" };
-    private readonly HotkeyBox _reloadKey = new();
-    private readonly HotkeyBox _topmostKey = new();
+    private readonly DarkInput _windowTitle = new();
 
-    private readonly DarkInput _extraOptions = new() { Multiline = true, Height = 68 };
-    private readonly DarkButton _rerunWizard = new() { Text = "Run setup wizard again", Size = new Size(190, 32) };
+    private List<AudioEndpoints.Endpoint> _endpoints = new();
 
-    private List<MpvPlayer.AudioDevice> _devices = new();
-
-    private const int RowH = 34, Edge = 24, LabelX = 24, InputX = 190, InputW = 500;
-
-    public SettingsForm(AppSettings settings, MpvPlayer? player)
+    public SettingsForm(AppSettings settings)
     {
         _settings = settings;
-        _player = player;
 
-        Text = "Backcast — Settings";
+        Text = "BackCast — Settings";
+        StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(720, 760);
+        ShowInTaskbar = false;
+        ClientSize = new Size(860, 660);
         BackColor = Theme.Bg;
         Font = Theme.Font();
-        ShowInTaskbar = false;
-        AutoScroll = true;
         Load += (_, _) => Theme.EnableDarkFrame(Handle);
 
+        DetectObs();
+
         int y = 22;
-        BuildConnection(ref y);
+        y = Section(y, "OBS");
+        _obsValue.ForeColor = Theme.Fg;
+        _obsValue.AutoSize = true;
+        _obsValue.Location = new Point(LabelX, y + 8);
+        _obsValue.MaximumSize = new Size(InputX + InputW - LabelX, 0);
+        Controls.Add(_obsValue);
+        y += RowH + 4;
+        _repairButton.Click += (_, _) => Repair();
+        _uninstallButton.Click += (_, _) => Uninstall();
+        _repairButton.Location = new Point(InputX, y);
+        _uninstallButton.Location = new Point(InputX + 140, y);
+        Controls.Add(_repairButton);
+        Controls.Add(_uninstallButton);
+        y += RowH + 10;
+
         y = Section(y, "AUDIO");
-        BuildAudio(ref y);
+        y = StackNote(y, "The plugin plays the OBS master mix to this device. Any device works for Discord — pick one you don't listen to, or you'll hear everything twice.");
+        RowLabel(ref y, "Output device");
+        Place(_deviceList, y - RowH - 10);
+        _refreshDevices.Click += (_, _) => RefreshDevices();
+        _autoButton.Click += (_, _) =>
+        {
+            PluginInstaller.SetPluginConfig(_obs!, "endpoint_id", "");
+            RefreshDevices();
+        };
+        _refreshDevices.Location = new Point(InputX + InputW + 10, y - RowH - 10);
+        _autoButton.Location = new Point(InputX + InputW + 105, y - RowH - 10);
+        Controls.Add(_refreshDevices);
+        Controls.Add(_autoButton);
+        _deviceList.SelectedIndexChanged += (_, _) => SaveEndpoint();
+        y += 4;
+
+        _installCable.Click += (_, _) =>
+        {
+            try
+            {
+                VbCable.RunInstaller();
+                _installCable.Text = "Installer launched — then Refresh";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "VB-Cable",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        _installCable.Location = new Point(InputX, y + 4);
+        Controls.Add(_installCable);
+        y += RowH + 6;
+
         y = Section(y, "WINDOW");
-        BuildWindow(ref y);
-        y = Section(y, "ADVANCED");
-        BuildAdvanced(ref y);
+        RowLabel(ref y, "Window title");
+        Place(_windowTitle, y - RowH - 10);
+        _windowTitle.Text = _obs?.IsInstalled == true
+            ? PluginInstaller.GetPluginConfig(_obs, "title") ?? "BackCast"
+            : "BackCast";
+        y = StackNote(y, "Shown in the window header, taskbar and Discord's share picker. Applies the next time the window opens.");
+
+        y = Section(y, "HOTKEYS");
+        y = StackNote(y, "Hotkeys are managed by OBS: Settings → Hotkeys → \"BackCast: toggle window\" and \"BackCast: toggle always on top\".");
 
         y += 6;
-        WireWizardButton();
-        _rerunWizard.Text = "↻   Run the setup wizard again";
-        _rerunWizard.Size = new Size(ClientSize.Width - Edge * 2, 42);
-        _rerunWizard.Location = new Point(Edge, y);
-        Controls.Add(_rerunWizard);
-        y += 54;
-        var ok = new DarkButton { Text = "OK", Size = new Size(104, 34), Location = new Point(ClientSize.Width - Edge - 224, y) };
-        var cancel = new DarkButton { Text = "Cancel", Size = new Size(104, 34), Location = new Point(ClientSize.Width - Edge - 112, y) };
-        ok.Click += (_, _) => SaveAndClose();
-        cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+        var ok = new DarkButton { Text = "OK", Size = new Size(104, 34), Location = new Point(ClientSize.Width - Edge - 104, y) };
+        ok.Click += (_, _) => { SaveAndClose(); };
         Controls.Add(ok);
-        Controls.Add(cancel);
-        ClientSize = new Size(ClientSize.Width, y + 34 + Edge);
 
         KeyPreview = true;
         KeyDown += (_, e) =>
         {
-            // Esc cancels an in-progress hotkey capture FIRST — closing the
-            // window mid-capture loses the keystroke (WebStage dialog rule)
-            if (_reloadKey.IsCapturing || _topmostKey.IsCapturing) return;
-            if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); e.Handled = true; }
+            if (e.KeyCode == Keys.Escape) { Close(); e.Handled = true; }
         };
 
         RefreshDevices();
-        UpdateDerived();
-        UpdateRelayState();
+        UpdateObsRow();
     }
 
-    /// <summary>
-    /// The download button and status reflect the real relay state whenever
-    /// the dialog opens (previously only correct on the very first open:
-    /// a re-opened dialog showed a pressable button and a gray "ready").
-    /// </summary>
-    private void UpdateRelayState()
+    private void DetectObs()
     {
-        if (MediaMtx.IsDownloaded)
+        var installs = PluginInstaller.FindObs();
+        _obs = !string.IsNullOrEmpty(_settings.ObsRoot)
+            ? installs.FirstOrDefault(i => i.RootPath.Equals(_settings.ObsRoot, StringComparison.OrdinalIgnoreCase))
+              ?? (PluginInstaller.LooksLikeObsRoot(_settings.ObsRoot)
+                  ? new PluginInstaller.ObsInstall(_settings.ObsRoot, PluginInstaller.IsPortable(_settings.ObsRoot))
+                  : null)
+            : null;
+        _obs ??= installs.FirstOrDefault();
+    }
+
+    private void UpdateObsRow()
+    {
+        if (_obs == null)
         {
-            _relayDownload.Enabled = false;
-            _relayStatus.Text = "relay ready ✓";
-            _relayStatus.ForeColor = Theme.Accent;
+            _obsValue.Text = "OBS not found — run the setup wizard";
+            _obsValue.ForeColor = Theme.Stop;
+            _repairButton.Enabled = _uninstallButton.Enabled = false;
         }
         else
         {
-            _relayDownload.Enabled = true;
-            _relayStatus.Text = "not downloaded yet";
-            _relayStatus.ForeColor = Theme.Gray;
+            _obsValue.Text = _obs.Title + (_obs.IsInstalled ? "  —  plugin installed ✓" : "  —  plugin missing");
+            _obsValue.ForeColor = _obs.IsInstalled ? Theme.Accent : Theme.Stop;
+            _repairButton.Enabled = _uninstallButton.Enabled = true;
         }
     }
 
-    // ---- sections ----
+    private void Repair()
+    {
+        if (_obs == null) return;
+        try
+        {
+            PluginInstaller.Install(_obs);
+            MessageBox.Show(this, "Plugin reinstalled. Restart OBS if it's running.",
+                "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        UpdateObsRow();
+    }
+
+    private void Uninstall()
+    {
+        if (_obs == null) return;
+        if (MessageBox.Show(this, "Remove the Backcast plugin from OBS?",
+                "BackCast", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        try
+        {
+            PluginInstaller.Uninstall(_obs);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        UpdateObsRow();
+    }
+
+    private void RefreshDevices()
+    {
+        _endpoints = AudioEndpoints.List();
+        _deviceList.Items.Clear();
+        _deviceList.Items.Add("(auto — plugin picks an unused device)");
+        foreach (var ep in _endpoints)
+            _deviceList.Items.Add(ep.Name + (ep.IsDefaultConsole ? "   (default)" : ""));
+        _deviceList.SelectedIndex = 0;
+
+        string? current = _obs?.IsInstalled == true ? PluginInstaller.GetPluginConfig(_obs, "endpoint_id") : null;
+        if (!string.IsNullOrEmpty(current))
+        {
+            int idx = _endpoints.FindIndex(e => e.Id == current);
+            if (idx >= 0) _deviceList.SelectedIndex = idx + 1;
+        }
+        _deviceList.Enabled = _obs?.IsInstalled == true;
+    }
+
+    private void SaveEndpoint()
+    {
+        if (_obs == null || _deviceList.SelectedIndex < 0) return;
+        // re-entrancy guard: SelectedIndexChanged fires while rebuilding
+        if (!_deviceList.Enabled && _deviceList.SelectedIndex == 0) return;
+        if (_deviceList.SelectedIndex == 0)
+            PluginInstaller.SetPluginConfig(_obs, "endpoint_id", "");
+        else if (_deviceList.SelectedIndex - 1 < _endpoints.Count)
+            PluginInstaller.SetPluginConfig(_obs, "endpoint_id", _endpoints[_deviceList.SelectedIndex - 1].Id);
+    }
+
+    private void SaveAndClose()
+    {
+        if (_obs != null)
+        {
+            string title = string.IsNullOrWhiteSpace(_windowTitle.Text) ? "BackCast" : _windowTitle.Text.Trim();
+            PluginInstaller.SetPluginConfig(_obs, "title", title);
+        }
+        Close();
+    }
+
+    // ---- layout helpers ----
 
     private int Section(int y, string title)
     {
@@ -128,7 +235,6 @@ internal sealed class SettingsForm : Form
         y += 26;
         Panel rule = new()
         {
-            AutoSize = false,
             Size = new Size(ClientSize.Width - Edge * 2, 1),
             BackColor = Theme.Sep,
             Location = new Point(Edge, y),
@@ -137,7 +243,6 @@ internal sealed class SettingsForm : Form
         return y + 12;
     }
 
-    /// <summary>A wrapped gray note measured before the next row — cannot overlap.</summary>
     private int StackNote(int y, string text)
     {
         var size = TextRenderer.MeasureText(text, Theme.Font(),
@@ -154,7 +259,7 @@ internal sealed class SettingsForm : Form
         return y + size.Height + 12;
     }
 
-    private Label RowLabel(ref int y, string text)
+    private void RowLabel(ref int y, string text)
     {
         Label lbl = new()
         {
@@ -165,7 +270,6 @@ internal sealed class SettingsForm : Form
         };
         Controls.Add(lbl);
         y += RowH + 10;
-        return lbl;
     }
 
     private void Place(Control input, int y, int? width = null)
@@ -173,237 +277,5 @@ internal sealed class SettingsForm : Form
         input.Location = new Point(InputX, y);
         input.Size = new Size(width ?? InputW, RowH);
         Controls.Add(input);
-    }
-
-    private void BuildConnection(ref int y)
-    {
-        y = Section(y, "CONNECTION");
-        _transport.Items.Add("Direct  —  OBS streams straight to Backcast (recommended)");
-        _transport.Items.Add("Relay  —  for the Aitum Multistream plugin");
-        _transport.SelectedIndex = _settings.UseRelay ? 1 : 0;
-        _transport.SelectedIndexChanged += (_, _) => UpdateDerived();
-        RowLabel(ref y, "How OBS connects");
-        Place(_transport, y - RowH - 10);
-
-        _udpPort.Minimum = 1024; _udpPort.Maximum = 65535;
-        _udpPort.Value = _settings.UdpPort;
-        _udpPort.ValueChanged += (_, _) => UpdateDerived();
-        RowLabel(ref y, "UDP port");
-        Place(_udpPort, y - RowH - 10, 120);
-
-        _rtmpPath.Text = _settings.RtmpPath;
-        _rtmpPath.TextChanged += (_, _) => UpdateDerived();
-        RowLabel(ref y, "Relay stream key");
-        Place(_rtmpPath, y - RowH - 10, 160);
-
-        y = StackNote(y, "Paste this into OBS → Settings → Stream (Custom), or into an Aitum Custom RTMP destination:");
-
-        _obsUrl.Text = _settings.ObsUrl;
-        _obsUrl.Location = new Point(InputX, y);
-        _obsUrl.Size = new Size(InputW - 96, RowH);
-        _copyUrl.Location = new Point(InputX + InputW - 88, y);
-        _copyUrl.Click += (_, _) => Clipboard.SetText(_obsUrl.Text);
-        Controls.Add(_obsUrl);
-        Controls.Add(_copyUrl);
-        y += RowH + 10;
-
-        _relayDownload.Click += (_, _) => DownloadRelay();
-        _relayDownload.Location = new Point(InputX, y);
-        _relayStatus.AutoSize = true;
-        _relayStatus.ForeColor = Theme.Gray;
-        // right of the install button (150 wide at InputX+105) — never on top of it
-        _relayStatus.Location = new Point(InputX + 105 + 150 + 12, y + 8);
-        if (MediaMtx.IsDownloaded)
-        {
-            _relayDownload.Enabled = false;
-            _relayStatus.Text = "relay ready ✓";
-            _relayStatus.ForeColor = Theme.Accent;
-        }
-        else
-        {
-            _relayStatus.Text = "not downloaded yet";
-            _relayStatus.ForeColor = Theme.Gray;
-        }
-        Controls.Add(_relayDownload);
-        Controls.Add(_relayStatus);
-        y += RowH + 4;
-    }
-
-    private void DownloadRelay()
-    {
-        _relayDownload.Enabled = false;
-        _relayStatus.Text = "downloading…";
-        _relayStatus.ForeColor = Theme.Amber;
-        Task.Run(() =>
-        {
-            try
-            {
-                MediaMtx.EnsureDownloaded();
-                BeginInvoke(UpdateRelayState);
-            }
-            catch (Exception ex)
-            {
-                BeginInvoke(() => { _relayStatus.Text = ex.Message; _relayStatus.ForeColor = Theme.Stop; _relayDownload.Enabled = true; });
-            }
-        });
-    }
-
-    private void BuildAudio(ref int y)
-    {
-        _audioMode.Items.Add("silentEndpoint — sound goes to a silent output (recommended)");
-        _audioMode.Items.Add("voiceCable — sound rides the Discord voice channel");
-        _audioMode.SelectedIndex = _settings.Audio.Mode == "voiceCable" ? 1 : 0;
-        RowLabel(ref y, "Mode");
-        Place(_audioMode, y - RowH - 10);
-
-        RowLabel(ref y, "Silent output device");
-        Place(_deviceList, y - RowH - 10);
-
-        _refreshDevices.Click += (_, _) => RefreshDevices();
-        _installCable.Click += (_, _) =>
-        {
-            try
-            {
-                VbCable.RunInstaller();
-                _installCable.Text = "Installer launched — then Refresh";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "VB-Cable",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        };
-        _refreshDevices.Location = new Point(InputX, y);
-        _installCable.Location = new Point(InputX + 105, y);
-        Controls.Add(_refreshDevices);
-        Controls.Add(_installCable);
-        y += RowH + 4;
-
-        y = StackNote(y, "Never mute Backcast in the Windows volume mixer — that mutes what your friends hear.");
-    }
-
-    private void BuildWindow(ref int y)
-    {
-        _displayName.Text = _settings.DisplayName;
-        RowLabel(ref y, "Display name");
-        Place(_displayName, y - RowH - 10, 220);
-
-        _autoStart.Checked = _settings.AutoStart;
-        _onTop.Checked = _settings.AlwaysOnTop;
-        StyleCheckBox(_autoStart);
-        StyleCheckBox(_onTop);
-        _autoStart.Location = new Point(InputX, y);
-        Controls.Add(_autoStart);
-        y += 26;
-        _onTop.Location = new Point(InputX, y);
-        Controls.Add(_onTop);
-        y += 34;
-
-        RowLabel(ref y, "Reload hotkey");
-        Place(_reloadKey, y - RowH - 10, 150);
-        _reloadKey.Combo = HotkeyCombo.Parse(_settings.Hotkeys.Reload);
-        AddHotkeyResetButton(ref y, _reloadKey, "F9");
-        RowLabel(ref y, "Always-on-top hotkey");
-        Place(_topmostKey, y - RowH - 10, 150);
-        _topmostKey.Combo = HotkeyCombo.Parse(_settings.Hotkeys.ToggleTopmost);
-        AddHotkeyResetButton(ref y, _topmostKey, "F10");
-    }
-
-    /// <summary>Small "Reset" chip right of a hotkey box — restores the default combo.</summary>
-    private void AddHotkeyResetButton(ref int y, HotkeyBox box, string defaultCombo)
-    {
-        var reset = new DarkButton
-        {
-            Text = "Reset",
-            Size = new Size(70, RowH),
-            Location = new Point(InputX + 160, y - RowH),
-        };
-        reset.Click += (_, _) =>
-        {
-            box.Combo = HotkeyCombo.Parse(defaultCombo);
-            box.Invalidate();
-        };
-        Controls.Add(reset);
-    }
-
-    private void BuildAdvanced(ref int y)
-    {
-        y = StackNote(y, "Extra mpv options (name=value, one per line) — leave empty unless you know why:");
-        _extraOptions.Text = string.Join(Environment.NewLine, _settings.ExtraMpvOptions);
-        _extraOptions.Location = new Point(InputX, y);
-        _extraOptions.Size = new Size(InputW, 68);
-        Controls.Add(_extraOptions);
-        y += 80;
-
-        y += 8;
-    }
-
-    private void WireWizardButton()
-    {
-        _rerunWizard.Click += (_, _) =>
-        {
-            DialogResult = DialogResult.Cancel;
-            Close();
-            using var wizard = new FirstRunWizard(_settings, _player!)
-                { StartPosition = FormStartPosition.CenterParent };
-            wizard.ShowDialog();
-        };
-    }
-
-    // ---- data ----
-
-    private void UpdateDerived()
-    {
-        bool relay = _transport.SelectedIndex == 1;
-        _udpPort.Enabled = !relay;
-        _rtmpPath.Enabled = relay;
-        _obsUrl.Text = relay
-            ? $"rtmp://127.0.0.1:1935/{_rtmpPath.Text.Trim()}"
-            : $"udp://127.0.0.1:{(int)_udpPort.Value}?pkt_size=1316";
-    }
-
-    private void RefreshDevices()
-    {
-        try { _devices = (_player?.GetAudioDevices() ?? Enumerable.Empty<MpvPlayer.AudioDevice>()).ToList(); }
-        catch { _devices = new List<MpvPlayer.AudioDevice>(); }
-        _deviceList.Items.Clear();
-        foreach (var d in _devices)
-            _deviceList.Items.Add(d.Description);
-        int idx = _devices.FindIndex(d => d.Name == _settings.Audio.SelectedDevice);
-        if (idx < 0)
-        {
-            var hint = AudioEndpointPicker.Find(_devices, _settings.Audio.EndpointHint)
-                ?? _devices.FirstOrDefault(d => d.Name != "auto");
-            idx = hint != null ? _devices.IndexOf(hint) : -1;
-        }
-        if (idx >= 0) _deviceList.SelectedIndex = idx;
-    }
-
-    private void SaveAndClose()
-    {
-        _settings.Transport = _transport.SelectedIndex == 1 ? "rtmp" : "udp";
-        _settings.UdpPort = (int)_udpPort.Value;
-        _settings.RtmpPath = string.IsNullOrWhiteSpace(_rtmpPath.Text) ? "discord" : _rtmpPath.Text.Trim();
-        _settings.Audio.Mode = _audioMode.SelectedIndex == 1 ? "voiceCable" : "silentEndpoint";
-        if (_deviceList.SelectedIndex >= 0 && _deviceList.SelectedIndex < _devices.Count)
-            _settings.Audio.SelectedDevice = _devices[_deviceList.SelectedIndex].Name;
-        _settings.DisplayName = string.IsNullOrWhiteSpace(_displayName.Text) ? "Backcast" : _displayName.Text.Trim();
-        _settings.AutoStart = _autoStart.Checked;
-        _settings.AlwaysOnTop = _onTop.Checked;
-        _settings.Hotkeys.Reload = _reloadKey.Combo.IsSet ? _reloadKey.Combo.ToString() : "F9";
-        _settings.Hotkeys.ToggleTopmost = _topmostKey.Combo.IsSet ? _topmostKey.Combo.ToString() : "F10";
-        _settings.ExtraMpvOptions = _extraOptions.Text
-            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
-        DialogResult = DialogResult.OK;
-        Close();
-    }
-
-    private static void StyleCheckBox(CheckBox cb)
-    {
-        cb.ForeColor = Theme.Fg;
-        cb.FlatStyle = FlatStyle.Flat;
-        cb.BackColor = Theme.Bg;
-        cb.AutoSize = true;
     }
 }

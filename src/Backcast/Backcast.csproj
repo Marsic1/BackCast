@@ -12,30 +12,29 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>1.1.0</Version>
+    <Version>0.3.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <!-- One-file release: everything (runtime + libmpv) inside Backcast.exe;
-         the DLL is unpacked to a temp dir automatically on first run. -->
+    <!-- One-file release: runtime + the OBS plugin embedded as a resource. -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
 
     <!-- one file means ONE file: no satellite language folders next to the exe -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
-  <!-- Dev builds: libmpv DLL fetched by tools/fetch-libmpv.ps1, copied next to the exe -->
-  <ItemGroup>
-    <Content Include="libmpv\libmpv-2.dll" CopyToOutputDirectory="PreserveNewest" Link="libmpv-2.dll" />
-  </ItemGroup>
-
-  <!-- multi-size app icon: exe icon (taskbar/Alt-Tab) + embedded resource
-       so the tray/titlebar can pick the right size instead of a stretched 32px -->
+  <!-- multi-size app icon: exe icon + embedded resource for tray/titlebar -->
   <ItemGroup>
     <EmbeddedResource Include="app.ico" />
+  </ItemGroup>
+
+  <!-- The OBS plugin payload, embedded and extracted by PluginInstaller.
+       Build the plugin first with its cmake presets (configure + build). -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\plugin\build_x64\Release\backcast-projector.dll" Link="assets\backcast-projector.dll" />
+    <EmbeddedResource Include="..\..\plugin\data\locale\en-US.ini" Link="assets\en-US.ini" />
   </ItemGroup>
 
 </Project>

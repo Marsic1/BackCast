@@ -3,472 +3,303 @@ using Backcast.Controls;
 namespace Backcast;
 
 /// <summary>
-/// First-run wizard — WebStage-styled with measured stacking (no hardcoded
-/// positions, nothing can overlap): step 1 selects Direct / Relay via large
-/// option cards; step 2 picks the silent audio output.
+/// Setup wizard for the plugin architecture: find OBS (standard or
+/// portable), install the embedded plugin into it, then explain how to open
+/// the BackCast window in OBS and share it in Discord with sound.
 /// </summary>
 internal sealed class FirstRunWizard : Form
 {
+    private const int Edge = 24;
+
     private readonly AppSettings _settings;
-    private readonly MpvPlayer _player;
+    private readonly DarkButton _nextButton = new() { Text = "Next  →", Size = new Size(118, 34) };
+    private readonly DarkButton _backButton = new() { Text = "←  Back", Size = new Size(98, 34) };
 
-    private readonly Panel _stepTransport = new() { Dock = DockStyle.Fill, Visible = true };
-    private readonly Panel _stepAudio = new() { Dock = DockStyle.Fill, Visible = false };
-    private readonly DarkButton _nextButton = new() { Text = "Next  →", Size = new Size(118, 32) };
-    private readonly DarkButton _backButton = new() { Text = "←  Back", Size = new Size(98, 32) };
+    private int _page;
+    private List<PluginInstaller.ObsInstall> _installs = new();
+    private PluginInstaller.ObsInstall? _chosen;
 
-    // step 1
-    private OptionCard _directCard = null!;
-    private OptionCard _relayCard = null!;
+    // page 1 controls
+    private readonly Panel _installList = new();
+    private readonly DarkButton _browseButton = new() { Text = "Browse for OBS folder…", Size = new Size(190, 34) };
+    private readonly Label _detectNote = new();
 
-    // step 2
-    private DarkCombo _deviceList = null!;
-    private readonly DarkButton _refreshButton = new() { Text = "Refresh list", Size = new Size(124, 32) };
-    private readonly DarkButton _installCable = new() { Text = "Install VB-Cable  (free)", Size = new Size(184, 32) };
-    private readonly Label _audioStatus = new();
-    private List<MpvPlayer.AudioDevice> _devices = new();
+    // page 2 controls
+    private readonly DarkButton _installButton = new() { Text = "Install the plugin", Size = new Size(190, 36) };
+    private readonly Label _installStatus = new();
 
-    private int _step;
-    private const int EdgeX = 36, TopY = 34, ContentW = 704;
-
-    public FirstRunWizard(AppSettings settings, MpvPlayer player)
+    public FirstRunWizard(AppSettings settings)
     {
         _settings = settings;
-        _player = player;
 
-        Text = "Welcome to Backcast";
+        Text = "BackCast — Setup";
+        Icon = TryIcon();
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(776, 700);
+        ClientSize = new Size(620, 420);
         BackColor = Theme.Bg;
         Font = Theme.Font();
         ShowInTaskbar = false;
-        Load += (_, _) => { Theme.EnableDarkFrame(Handle); BuildTransportStep(); BuildAudioStep(); };
+        Load += (_, _) => Theme.EnableDarkFrame(Handle);
 
-        _backButton.Location = new Point(EdgeX, ClientSize.Height - 46);
-        _backButton.Click += (_, _) => SetStep(0);
-        _backButton.Visible = false;
-        _nextButton.Location = new Point(ClientSize.Width - EdgeX - 118, ClientSize.Height - 46);
-        _nextButton.Click += (_, _) =>
-        {
-            if (_step == 0) SetStep(1);
-            else Finish();
-        };
+        _nextButton.Click += Next;
+        _backButton.Click += (_, _) => { _page--; ShowPage(); };
+        _browseButton.Click += (_, _) => BrowseForObs();
+        _installButton.Click += (_, _) => Install();
+
+        _backButton.Location = new Point(Edge, ClientSize.Height - 48);
+        _nextButton.Location = new Point(ClientSize.Width - Edge - 118, ClientSize.Height - 48);
         Controls.Add(_backButton);
         Controls.Add(_nextButton);
-        Controls.Add(_stepTransport);
-        Controls.Add(_stepAudio);
+
+        DetectObs();
+        ShowPage();
     }
 
-    private void SetStep(int step)
-    {
-        _step = step;
-        _stepTransport.Visible = step == 0;
-        _stepAudio.Visible = step == 1;
-        _backButton.Visible = step == 1;
-        _nextButton.Text = step == 0 ? "Next  →" : "Finish  ✓";
-        if (step == 1) RefreshDeviceList();
-    }
-
-    // ---- measured layout helpers (no hardcoded label positions) ----
-
-    /// <summary>Adds a wrapped label at y; returns y below it (+ gap).</summary>
-    private int StackLabel(Panel parent, ref int y, string text, Font font, Color color, int? width = null)
-    {
-        int w = width ?? ContentW;
-        var size = Measure(parent, text, font, w);
-        Label lbl = new()
-        {
-            Text = text,
-            Font = font,
-            ForeColor = color,
-            Bounds = new Rectangle(EdgeX, y, w, size.Height),
-            AutoSize = false,
-        };
-        parent.Controls.Add(lbl);
-        return y + size.Height + 10;
-    }
-
-    private static Size Measure(Control parent, string text, Font font, int width) =>
-        TextRenderer.MeasureText(text, font, new Size(width, int.MaxValue),
-            TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
-
-    // ---- step 1 ----
-
-    private void BuildTransportStep()
-    {
-        var titleFont = new Font(Theme.FontBold().FontFamily, 15f, FontStyle.Bold);
-        int y = TopY;
-        y = StackLabel(_stepTransport, ref y, "Connect OBS to Backcast", titleFont, Theme.Fg);
-        y = StackLabel(_stepTransport, ref y,
-            "Pick how OBS sends the picture to this app. Nothing goes to the internet — everything stays on this PC.",
-            Theme.Font(), Theme.Gray) + 4;
-
-        // ---- card 1: direct ----
-        _directCard = new OptionCard
-        {
-            Title = "Direct  (UDP)  —  ★ RECOMMENDED",
-            Subtitle = "Lowest latency — works with OBS AND with Aitum Multistream",
-            Badge = "1",
-            Description =
-                "OBS's Stream button or an Aitum Custom destination can both send here directly — no relay hop, lowest latency. "
-                + "Paste this as the server (OBS → Settings → Stream → Custom, or Aitum → Custom destination; the key can be anything):",
-            Url = _settings.ObsUrl,
-        };
-        _directCard.IsSelected = true;
-        _directCard.Location = new Point(EdgeX, y);
-        _directCard.Size = new Size(ContentW, OptionCard.MeasureHeight(_directCard, ContentW));
-        _directCard.SelectionChanged += (_, _) => OnCardSelected(_directCard);
-        _stepTransport.Controls.Add(_directCard);
-        y += _directCard.Height + 14;
-
-        // ---- card 2: relay ----
-        _relayCard = new OptionCard
-        {
-            Title = "Relay  (RTMP)",
-            Subtitle = "Alternative — if UDP is blocked in your setup",
-            Badge = "2",
-            Description =
-                "Same picture, but through a tiny local relay (downloaded below, started automatically) — adds about a second. "
-                + "In OBS or Aitum Multistream, add a destination with this server and the key \"discord\":",
-            Url = $"rtmp://127.0.0.1:1935/{_settings.RtmpPath}",
-            Extra = BuildRelayExtra(),
-        };
-        _relayCard.Location = new Point(EdgeX, y);
-        _relayCard.Size = new Size(ContentW, OptionCard.MeasureHeight(_relayCard, ContentW));
-        _relayCard.SelectionChanged += (_, _) => OnCardSelected(_relayCard);
-        _stepTransport.Controls.Add(_relayCard);
-    }
-
-    /// <summary>The relay card's extra content: download button + status.</summary>
-    private Control BuildRelayExtra()
-    {
-        // the row sits on the option card (BgPanel): give the row the SAME
-        // BackColor, not Transparent — simulated transparency samples the
-        // immediate parent, and a Transparent child renders white-cornered
-        // artifacts where the rounded button clips against it
-        Panel row = new() { AutoSize = false, Height = 40, BackColor = Theme.BgPanel };
-        var download = new DarkButton { Text = "Download relay  (one-time)", Size = new Size(214, 32), Location = new Point(18, 0) };
-        var status = new Label
-        {
-            AutoSize = true,
-            ForeColor = Theme.Gray,
-            Location = new Point(244, 8),
-            Font = Theme.Font(),
-        };
-        if (MediaMtx.IsDownloaded)
-        {
-            download.Enabled = false;
-            status.Text = "relay ready ✓";
-            status.ForeColor = Theme.Accent;
-        }
-        download.Click += (_, _) =>
-        {
-            download.Enabled = false;
-            status.Text = "downloading…";
-            status.ForeColor = Theme.Amber;
-            Task.Run(() =>
-            {
-                try
-                {
-                    MediaMtx.EnsureDownloaded();
-                    BeginInvoke(() => { status.Text = "relay ready ✓"; status.ForeColor = Theme.Accent; });
-                }
-                catch (Exception ex)
-                {
-                    BeginInvoke(() => { status.Text = ex.Message; status.ForeColor = Theme.Stop; download.Enabled = true; });
-                }
-            });
-        };
-        row.Controls.Add(download);
-        row.Controls.Add(status);
-        return row;
-    }
-
-    private void OnCardSelected(OptionCard card)
-    {
-        if (!card.IsSelected) return;
-        var other = card == _directCard ? _relayCard : _directCard;
-        if (other.IsSelected) other.IsSelected = false;
-    }
-
-    // ---- step 2 ----
-
-    private void BuildAudioStep()
-    {
-        var titleFont = new Font(Theme.FontBold().FontFamily, 15f, FontStyle.Bold);
-        int y = TopY;
-        y = StackLabel(_stepAudio, ref y, "Where should the sound go?", titleFont, Theme.Fg);
-        y = StackLabel(_stepAudio, ref y,
-            "Backcast must keep playing the sound for Discord to capture it — but you don't want to hear it twice.\n" +
-            "So it plays into a \"silent\" output: either VB-Cable, or any HDMI/monitor output with nothing attached\n" +
-            "to it. Your friends hear everything either way.",
-            Theme.Font(), Theme.Gray) + 6;
-
-        y = StackLabel(_stepAudio, ref y, "Silent output device", Theme.FontBold(), Theme.Fg);
-
-        _deviceList = new DarkCombo { Bounds = new Rectangle(EdgeX, y, ContentW, 34) };
-        _stepAudio.Controls.Add(_deviceList);
-        y += 44;
-
-        _refreshButton.Location = new Point(EdgeX, y);
-        _refreshButton.Click += (_, _) => RefreshDeviceList();
-        _installCable.Location = new Point(EdgeX + 132, y);
-        _installCable.Click += (_, _) => InstallCable();
-        _stepAudio.Controls.Add(_refreshButton);
-        _stepAudio.Controls.Add(_installCable);
-        y += 42;
-
-        _audioStatus.ForeColor = Theme.Gray;
-        _audioStatus.Font = Theme.Font();
-        _audioStatus.AutoSize = false;
-        _audioStatus.Bounds = new Rectangle(EdgeX, y, ContentW, 36);
-        _stepAudio.Controls.Add(_audioStatus);
-        y += 44;
-
-        StackLabel(_stepAudio, ref y,
-            "One rule: never mute Backcast in the Windows volume mixer — that would mute what your friends hear.",
-            Theme.Font(), Theme.Gray);
-    }
-
-    private void RefreshDeviceList()
+    private static Icon? TryIcon()
     {
         try
         {
-            _devices = _player.GetAudioDevices().ToList();
+            using var stream = typeof(FirstRunWizard).Assembly.GetManifestResourceStream("Backcast.app.ico");
+            return stream == null ? null : new Icon(stream);
         }
-        catch
-        {
-            _devices = new List<MpvPlayer.AudioDevice>();
-        }
-        _deviceList.Items.Clear();
-        var silent = SilentCandidates(_devices).ToList();
-        foreach (var d in _devices)
-            _deviceList.Items.Add(DeviceLabel(d, silent.Contains(d)));
-        if (_deviceList.Items.Count > 0)
-        {
-            _deviceList.SelectedIndex = silent.Count > 0
-                ? _devices.IndexOf(silent[0])
-                : 0;
-        }
-        _audioStatus.Text = silent.Count > 0
-            ? "Good silent outputs are marked with ✓ — pick one of those if unsure."
-            : "No obvious silent output found. Install VB-Cable below, or pick any HDMI output.";
+        catch { return null; }
     }
 
-    private void InstallCable()
+    // ---- page 1: detect OBS ----
+
+    private void DetectObs()
     {
-        _installCable.Enabled = false;
-        _audioStatus.Text = "downloading VB-Cable…";
-        _audioStatus.ForeColor = Theme.Amber;
-        Task.Run(() =>
+        _installs = PluginInstaller.FindObs();
+        // remembered root wins if still valid
+        if (PluginInstaller.LooksLikeObsRoot(_settings.ObsRoot))
         {
-            try
-            {
-                VbCable.RunInstaller();
-                BeginInvoke(() =>
-                {
-                    _audioStatus.Text = "Installer launched — click \"Install driver\" in it, then press Refresh list.";
-                    _audioStatus.ForeColor = Theme.Fg;
-                    _installCable.Enabled = true;
-                });
-            }
-            catch (Exception ex)
-            {
-                BeginInvoke(() =>
-                {
-                    _audioStatus.Text = ex.Message;
-                    _audioStatus.ForeColor = Theme.Stop;
-                    _installCable.Enabled = true;
-                });
-            }
-        });
+            var remembered = new PluginInstaller.ObsInstall(_settings.ObsRoot, PluginInstaller.IsPortable(_settings.ObsRoot));
+            _chosen = _installs.FirstOrDefault(i => i.RootPath.Equals(_settings.ObsRoot, StringComparison.OrdinalIgnoreCase))
+                      ?? remembered;
+        }
+        _chosen ??= _installs.FirstOrDefault();
     }
 
-    private void Finish()
+    private void BuildInstallList()
     {
-        _settings.Transport = _relayCard.IsSelected ? "rtmp" : "udp";
-        if (_deviceList.SelectedIndex >= 0 && _deviceList.SelectedIndex < _devices.Count)
-            _settings.Audio.SelectedDevice = _devices[_deviceList.SelectedIndex].Name;
-        _settings.FirstRun = false;
-        _settings.Save();
-        DialogResult = DialogResult.OK;
-        Close();
-    }
-
-    // ---- helpers ----
-
-    private static IEnumerable<MpvPlayer.AudioDevice> SilentCandidates(
-        IReadOnlyList<MpvPlayer.AudioDevice> devices)
-    {
-        bool IsSilent(MpvPlayer.AudioDevice d)
+        _installList.Controls.Clear();
+        int y = 0;
+        foreach (var install in _installs)
         {
-            if (d.Name == "auto") return false;
-            if (d.Description.Contains("default", StringComparison.OrdinalIgnoreCase)) return false;
-            string[] markers =
+            var row = new Panel
             {
-                "CABLE", "HDMI", "DisplayPort", "High Definition Audio",
-                "Digital", "SPDIF", "TV", "PROJECTOR", "Dummy", "Monitor",
+                Size = new Size(_installList.Width, 44),
+                Location = new Point(0, y),
+                BackColor = Theme.BgPanel,
+                Cursor = Cursors.Hand,
+                Tag = install,
             };
-            return markers.Any(m => d.Description.Contains(m, StringComparison.OrdinalIgnoreCase));
+            var title = new Label
+            {
+                Text = (install.IsPortable ? "Portable OBS" : "OBS Studio") +
+                       (install.IsInstalled ? "   —   plugin already installed" : ""),
+                ForeColor = install.Equals(_chosen) ? Theme.Accent : Theme.Fg,
+                Font = Theme.FontBold(),
+                AutoSize = true,
+                Location = new Point(14, 5),
+            };
+            var path = new Label
+            {
+                Text = install.RootPath,
+                ForeColor = Theme.Gray,
+                AutoSize = true,
+                Location = new Point(14, 24),
+            };
+            row.Controls.Add(title);
+            row.Controls.Add(path);
+            row.Click += (_, _) => { _chosen = install; RefreshListSelection(); UpdateNav(); };
+            foreach (Control c in row.Controls)
+                c.Click += (_, _) => { _chosen = install; RefreshListSelection(); UpdateNav(); };
+            _installList.Controls.Add(row);
+            y += 52;
         }
-
-        return devices.Where(IsSilent)
-            .OrderByDescending(d => d.Description.Contains("CABLE", StringComparison.OrdinalIgnoreCase));
+        RefreshListSelection();
     }
 
-    private static string DeviceLabel(MpvPlayer.AudioDevice d, bool silent) =>
-        (silent ? "✓   " : "") + d.Description;
-
-    /// <summary>
-    /// Selectable option card with measured internal stacking: badge + title,
-    /// subtitle, description, URL chip (click to copy), optional extra row.
-    /// </summary>
-    private sealed class OptionCard : Panel
+    private void RefreshListSelection()
     {
-        private const int PadX = 18, PadTop = 18, RowGap = 10;
-        private readonly Panel _badge = new() { Size = new Size(30, 30) };
-        private readonly Label _badgeText = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = Theme.FontBold(), ForeColor = Theme.Bg };
-        private readonly Label _title = new() { Font = new Font(Theme.FontBold().FontFamily, 12f, FontStyle.Bold), ForeColor = Theme.Fg, AutoSize = true };
-        private readonly Label _subtitle = new() { Font = Theme.Font(), ForeColor = Theme.Gray, AutoSize = true };
-        private readonly Label _description = new() { Font = Theme.Font(), ForeColor = Theme.Fg };
-        private readonly UrlChip _url = new();
-        private Control? _extra;
-        private bool _selected;
-
-        public event EventHandler? SelectionChanged;
-
-        public bool IsSelected
+        foreach (Panel row in _installList.Controls.Cast<Control>().OfType<Panel>())
         {
-            get => _selected;
-            set
-            {
-                if (_selected == value) return;
-                _selected = value;
-                UpdateVisual();
-                SelectionChanged?.Invoke(this, EventArgs.Empty);
-            }
+            bool selected = row.Tag is PluginInstaller.ObsInstall ins && ins.Equals(_chosen);
+            row.BackColor = selected ? Theme.Hover : Theme.BgPanel;
+        }
+    }
+
+    private void BrowseForObs()
+    {
+        using var dlg = new FolderBrowserDialog { Description = "Select your OBS folder (contains bin and obs-plugins)" };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        if (!PluginInstaller.LooksLikeObsRoot(dlg.SelectedPath))
+        {
+            MessageBox.Show(this, "That folder doesn't contain bin\\64bit\\obs64.exe.",
+                "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        _chosen = new PluginInstaller.ObsInstall(dlg.SelectedPath, PluginInstaller.IsPortable(dlg.SelectedPath));
+        UpdateNav();
+    }
+
+    // ---- page 2: install ----
+
+    private void Install()
+    {
+        if (_chosen == null) return;
+        _installButton.Enabled = false;
+        _installStatus.Text = "installing…";
+        _installStatus.ForeColor = Theme.Amber;
+        try
+        {
+            PluginInstaller.Install(_chosen);
+            _settings.ObsRoot = _chosen.RootPath;
+            _installStatus.Text = "installed ✓ — restart OBS if it's running";
+            _installStatus.ForeColor = Theme.Accent;
+            _nextButton.Enabled = true;
+        }
+        catch (Exception ex)
+        {
+            _installStatus.Text = ex.Message;
+            _installStatus.ForeColor = Theme.Stop;
+            _installButton.Enabled = true;
+        }
+    }
+
+    // ---- navigation ----
+
+    private void Next(object? sender, EventArgs e)
+    {
+        if (_page == 2) { Close(); return; }
+        if (_page == 0 && _chosen != null)
+            _settings.ObsRoot = _chosen.RootPath;
+        _page++;
+        ShowPage();
+    }
+
+    private void ShowPage()
+    {
+        // clear page body (keep nav buttons)
+        foreach (Control c in Controls.Cast<Control>().Where(c => c != _nextButton && c != _backButton).ToList())
+        {
+            Controls.Remove(c);
+            if (c != _installList && c != _detectNote && c != _installButton && c != _installStatus && c != _browseButton)
+                c.Dispose();
         }
 
-        public string Title { init { _title.Text = value; } }
-        public string Subtitle { init { _subtitle.Text = value; } }
-        public string Badge { init { _badgeText.Text = value; } }
-        public string Description
+        if (_page == 0) BuildPageDetect();
+        else if (_page == 1) BuildPageInstall();
+        else BuildPageDone();
+
+        _backButton.Visible = _page > 0;
+        UpdateNav();
+    }
+
+    private void UpdateNav()
+    {
+        _nextButton.Enabled = _page switch
         {
-            init
-            {
-                _description.Text = value;
-                _description.ForeColor = Theme.Fg;
-            }
-        }
-        public string Url { init { _url.Text = value; } }
-        public Control Extra
+            0 => _chosen != null,
+            1 => _chosen?.IsInstalled == true,
+            _ => true, // done page: Finish is always available
+        };
+        _nextButton.Text = _page == 2 ? "Finish" : "Next  →";
+    }
+
+    // ---- pages ----
+
+    private void PageTitle(string title, string sub)
+    {
+        Label h = new()
         {
-            init
-            {
-                _extra = value;
-                Controls.Add(value);
-            }
-        }
-
-        public OptionCard()
+            Text = title,
+            Font = new Font(Theme.FontBold().FontFamily, 13f, FontStyle.Bold),
+            ForeColor = Theme.Fg,
+            AutoSize = true,
+            Location = new Point(Edge, 24),
+        };
+        Label s = new()
         {
-            BackColor = Theme.BgPanel;
-            Cursor = Cursors.Hand;
-            _badge.Controls.Add(_badgeText);
-            Controls.Add(_badge);
-            Controls.Add(_title);
-            Controls.Add(_subtitle);
-            Controls.Add(_description);
-            Controls.Add(_url);
+            Text = sub,
+            ForeColor = Theme.Gray,
+            AutoSize = true,
+            Location = new Point(Edge, 54),
+        };
+        Controls.Add(h);
+        Controls.Add(s);
+    }
 
-            Click += Select;
-            foreach (Control c in Controls)
-            {
-                c.Click += Select;
-                c.Cursor = Cursors.Hand;
-            }
-            UpdateVisual();
-        }
+    private void BuildPageDetect()
+    {
+        PageTitle("Find OBS Studio", "BackCast installs a plugin into your OBS folder.");
+        _installList.SetBounds(Edge, 96, ClientSize.Width - Edge * 2, 180);
+        _installList.AutoScroll = true;
+        _installList.BackColor = Theme.Bg;
+        BuildInstallList();
+        Controls.Add(_installList);
 
-        protected override void OnControlAdded(ControlEventArgs e)
+        _browseButton.Location = new Point(Edge, 290);
+        Controls.Add(_browseButton);
+
+        _detectNote.ForeColor = Theme.Gray;
+        _detectNote.AutoSize = true;
+        _detectNote.Text = _installs.Count == 0
+            ? "No OBS found — start OBS once, or browse for its folder."
+            : "Pick the installation to use. Running instances are found automatically.";
+        _detectNote.Location = new Point(Edge, 335);
+        Controls.Add(_detectNote);
+    }
+
+    private void BuildPageInstall()
+    {
+        PageTitle("Install the plugin",
+            _chosen == null ? "" : $"Into: {_chosen.Title}");
+        _installButton.Location = new Point(Edge, 110);
+        _installButton.Enabled = _chosen?.IsInstalled != true;
+        Controls.Add(_installButton);
+
+        _installStatus.AutoSize = true;
+        _installStatus.Location = new Point(Edge, 160);
+        _installStatus.Text = _chosen?.IsInstalled == true
+            ? "already installed ✓ — you can continue"
+            : "one file into obs-plugins\\64bit plus its data folder; no admin needed for portable installs";
+        _installStatus.ForeColor = _chosen?.IsInstalled == true ? Theme.Accent : Theme.Gray;
+        Controls.Add(_installStatus);
+
+        Label note = new()
         {
-            base.OnControlAdded(e);
-            e.Control.Click += Select;
-            e.Control.Cursor = Cursors.Hand;
-            // wire children added later (URL input contents etc.)
-            foreach (Control gc in e.Control.Controls)
-            {
-                gc.Click += Select;
-                gc.Cursor = Cursors.Hand;
-            }
-        }
+            Text = "If OBS is running, close and reopen it after installing.",
+            ForeColor = Theme.Gray,
+            AutoSize = true,
+            Location = new Point(Edge, 200),
+        };
+        Controls.Add(note);
+    }
 
-        private void Select(object? sender, EventArgs e) => IsSelected = true;
+    private void BuildPageDone()
+    {
+        PageTitle("You're all set", "One window in OBS carries video + audio for Discord.");
 
-        /// <summary>Total height needed at the given width (measured, nothing hardcoded).</summary>
-        public static int MeasureHeight(OptionCard card, int width)
+        string text =
+            "1.  Open OBS and choose  Tools → BackCast window  (or set a hotkey in\n" +
+            "     OBS Settings → Hotkeys → \"BackCast: toggle window\").\n\n" +
+            "2.  In Discord, share the \"BackCast\" window and enable sound.\n" +
+            "     Video is a frame behind your scene; audio is the exact master mix.\n\n" +
+            "3.  The plugin plays the mix to an unused audio device so you don't\n" +
+            "     hear it twice — check or change it in BackCast settings.\n\n" +
+            "Important:  keep audio monitoring OFF on your OBS sources — anything\n" +
+            "OBS plays itself is picked up by the Discord share too.";
+
+        Label body = new()
         {
-            using var g = Graphics.FromHwnd(IntPtr.Zero);
-            int innerW = Math.Max(60, width - PadX * 2 - 10);
-
-            var titleSize = TextRenderer.MeasureText(g, card._title.Text, card._title.Font);
-            var subSize = TextRenderer.MeasureText(g, card._subtitle.Text, card._subtitle.Font);
-            int headerH = Math.Max(32, titleSize.Height + subSize.Height + 4);
-
-            var descSize = TextRenderer.MeasureText(g, card._description.Text, card._description.Font,
-                new Size(innerW - 10, int.MaxValue),
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
-
-            int extraH = card._extra is null ? 0 : card._extra.Height + RowGap;
-            return PadTop + headerH + RowGap + descSize.Height + RowGap + 34 + extraH + PadTop;
-        }
-
-        /// <summary>Positions all children; call after the card is sized.</summary>
-        public void LayoutChildren()
-        {
-            int x = PadX;
-            _badge.Location = new Point(x, PadTop);
-            _title.Location = new Point(x + 42, PadTop - 2);
-            _subtitle.Location = new Point(x + 42, PadTop + _title.PreferredHeight - 4);
-
-            int y = PadTop + Math.Max(34, _title.PreferredHeight + _subtitle.PreferredHeight);
-            using var g = CreateGraphics();
-            var descSize = TextRenderer.MeasureText(g, _description.Text, _description.Font,
-                new Size(Width - PadX * 2 - 10, int.MaxValue),
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
-            _description.SetBounds(x + 28, y, Width - PadX * 2 - 10, descSize.Height);
-            y += descSize.Height + RowGap;
-            _url.SetBounds(x + 28, y, Width - PadX * 2 - 10, 34);
-            y += 34 + RowGap;
-            _extra?.SetBounds(x + 28, y, Width - PadX * 2 - 10, _extra.Height);
-        }
-
-        protected override void OnResize(EventArgs e)
-        {
-            base.OnResize(e);
-            if (Width > 80) LayoutChildren();
-        }
-
-        private void UpdateVisual()
-        {
-            BackColor = _selected ? Theme.ChipBg : Theme.BgPanel;
-            _badge.BackColor = _selected ? Theme.Accent : Theme.Sep;
-            _title.ForeColor = _selected ? Theme.Accent : Theme.Fg;
-            Invalidate();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            var g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var fill = new SolidBrush(_selected ? Theme.ChipBg : Theme.BgPanel))
-                Theme.FillRoundedRect(g, fill, ClientRectangle, 10);
-            using (var border = new Pen(_selected ? Theme.ChipBorder : Theme.Sep, _selected ? 1.6f : 1f))
-                Theme.DrawRoundedRect(g, border, Rectangle.Inflate(ClientRectangle, -1, -1), 10);
-            using (var badgeFill = new SolidBrush(_selected ? Theme.Accent : Theme.Sep))
-                g.FillEllipse(badgeFill, _badge.Bounds);
-        }
+            Text = text,
+            ForeColor = Theme.Fg,
+            Bounds = new Rectangle(Edge, 96, ClientSize.Width - Edge * 2, 240),
+        };
+        Controls.Add(body);
     }
 }

@@ -1,119 +1,93 @@
-# Backcast
+# BackCast
 
 > The opposite of broadcast — your OBS scene with friends on Discord, without going live.
 
-One exe. Run it, follow the two-step first-run wizard, share the window on Discord. Your friends see your OBS scene and hear your full OBS mix.
+One window in OBS carries **video + audio** to a Discord screen-share at **~1 frame of latency**. No encoder round-trip, no relay, no VB-Cable.
+
+**How it works (v0.3):** an OBS plugin (`backcast-projector.dll`) opens a borderless window that renders the OBS **program mix** through `obs_render_main_texture()` — the exact code path OBS's own projector uses — and taps the OBS **master audio mix** (`audio_output_connect`, mix 0), playing it through its own WASAPI stream inside the OBS process. Because the window and the audio both live in `obs64.exe`, a single Discord window-share captures both. The BackCast.exe app is just the installer and settings UI for the plugin.
+
+Previous architecture (UDP/RTSP + mpv) carried a 1.5–2 s delay inherent to the TS/RTSP pipeline — confirmed with ffplay, so it wasn't the app. That code is gone (see git history, v0.2 tag).
 
 ---
 
 ## For the user
 
-**Release = one file** (`Backcast.exe`, ~108 MB, everything inside). Copy it anywhere, double-click.
+## Installing — two ways
 
-- **First launch** opens a 2-step setup:
-  1. *How OBS connects*: **Direct** (recommended — paste one URL into OBS's Stream settings) or **Relay** (if you use the Aitum Multistream plugin — the wizard downloads the tiny local relay for you and shows the Aitum destination to paste).
-  2. *Where the sound goes*: pick a silent audio output (VB-Cable or an unused HDMI/monitor output) from the list; one click installs VB-Cable if you don't have it.
-- After that it just works: start streaming in OBS → the window goes **🔴 LIVE** → share it on Discord with **Sound ON**.
-- OBS stops streaming → the window shows **⏳ waiting**; OBS restarts → recovers by itself, zero clicks.
-- All settings via the tray icon or window right-click → **Settings…** (connection, audio output, display name, hotkeys, always-on-top). Nothing to edit by hand.
-- **Never mute Backcast in the Windows volume mixer** — that mutes what your friends hear.
+### A. The BackCast app (recommended for most people)
 
-Diagnostic log (if troubleshooting): `%TEMP%\Backcast.log`. Settings: `%APPDATA%\Backcast\settings.json`.
+**Release = one file** (`BackCast.exe`, everything inside — including the plugin). Copy it anywhere, double-click.
 
-### The two connection modes (why both)
+1. **First launch** — the wizard finds your OBS (standard or portable — a running OBS is detected automatically) and installs the plugin into it.
+2. **In OBS**: `Tools → Backcast window` (or set a hotkey in OBS `Settings → Hotkeys` — "Backcast: toggle window", "Backcast: toggle always on top").
+3. **In Discord**: share the **Backcast** window with **sound on**.
 
-- **Direct (UDP)** — OBS's own Stream output sends to `udp://127.0.0.1:1234?pkt_size=1316`. Lowest latency, zero extra software. Use this if you stream with OBS's plain Start Streaming button.
-- **Relay (RTMP→RTSP)** — Aitum Multistream destinations are RTMP-only, so they can't send UDP. Backcast bundles a tiny local relay (MediaMTX): Aitum sends `rtmp://127.0.0.1:1935/discord`, Backcast plays the RTSP side. Downloaded on first setup, started/stopped with the app automatically. Adds ~0.5–1.5 s latency.
+The app also offers the **one-click VB-Cable download/install** (Settings → Audio, or the button on the main window) for when your machine has no spare audio output.
+
+- Video is a frame behind your scene; audio is the exact master mix — the same thing your stream/recording hears.
+- **When closed, the plugin uses no resources at all** — no window, no audio stream, no threads. Open it only when you want to share.
+- The plugin plays the mix to an **unused audio device** (auto-picked; TV/HDMI/dummy outputs are preferred) so you don't hear everything twice. Change it in Backcast → Settings → Audio, or right-click the window → Audio device.
+- **Keep audio monitoring OFF on your OBS sources** — Discord captures everything OBS plays, so monitored sources would double into the share.
+- Settings/tray: repair or uninstall the plugin, change the audio device, re-run the wizard.
+
+Diagnostic log: `%TEMP%\Backcast.log`. App settings: `%APPDATA%\Backcast\settings.json`. Plugin settings (per OBS install): `config\obs-studio\plugin_config\backcast-projector\config.json` (portable) or the same path under `%APPDATA%` (standard).
+
+### B. Direct plugin install (plugin managers / manual copy)
+
+Grab `backcast-projector-<version>-windows-x64.zip` from the releases and:
+
+- **Plugin manager (StreamUP etc.)**: the zip uses the standard plugin layout they expect — point the manager at it.
+- **Standard OBS, manual**: extract, copy the `backcast-projector` folder into `C:\ProgramData\obs-studio\plugins\` (no admin needed; OBS loads `ProgramData\obs-studio\plugins\<name>\bin\64bit\<name>.dll`).
+- **Portable OBS, manual**: copy `bin\64bit\backcast-projector.dll` → `<OBS root>\obs-plugins\64bit\` and `data\locale\en-US.ini` → `<OBS root>\data\obs-plugins\backcast-projector\locale\`.
+
+Everything the plugin needs is configurable from its own right-click menu (audio device, rename, always on top), so a direct install works without the app — you only miss the wizard, the VB-Cable one-click, and the settings UI.
 
 ## For the developer
 
-Requirements: .NET 8 SDK, Windows 10/11 x64.
+Requirements: .NET 8 SDK, CMake ≥ 3.28, Visual Studio 2022/2026 (C++ workload), Windows 10/11 x64.
 
-```powershell
-# fetch libmpv once (dev builds need the DLL next to the exe;
-# the single-file release bundles it inside Backcast.exe)
-powershell -ExecutionPolicy Bypass -File tools\fetch-libmpv.ps1
+```bash
+# 1. build the OBS plugin (first configure downloads prebuilt libobs via buildspec)
+cd plugin
+cmake --preset windows-x64
+cmake --build --preset windows-x64 --config Release
 
-# build & run (note: output lands in bin/Debug/net8.0-windows/win-x64/)
-dotnet run --project src\Backcast
+# 2. build/publish the app (embeds the plugin DLL as a resource)
+cd ../src/Backcast
+dotnet publish -c Release -r win-x64 --self-contained
 
-# the one-file release
-dotnet publish src\Backcast\Backcast.csproj -c Release
-# → src\Backcast\bin\Release\net8.0-windows\win-x64\publish\Backcast.exe
+# 3. package the plugin zip for direct installs / plugin managers
+cd ../..
+powershell -File tools/package-plugin.ps1
 ```
 
-Test without OBS (the acceptance transmitter):
+The plugin's cmake presets pin the Windows SDK version — adjust `architecture` in `plugin/CMakePresets.json` if yours differs (search for `version=`).
 
-```cmd
-tools\test-transmitter.cmd         :: 1080p60 test pattern + 440 Hz tone → udp://127.0.0.1:1234
-tools\test-transmitter-stop.cmd
+Repo layout:
+
+```
+plugin/          C OBS plugin (obs-plugintemplate base)
+  src/plugin-main.c   lazy window + obs_display + draw callback + lifecycle
+  src/audio-out.c     master-mix WASAPI renderer + endpoint picking
+src/Backcast/    .NET 8 WinForms installer/settings/tray (WebStage dark UI)
+tools/           (legacy test transmitters from the mpv era)
 ```
 
-Architecture: WinForms x64 + libmpv embedded via the `wid` option (mpv renders into a
-child HWND). `MpvPlayer` owns the context, observed properties (`core-idle`,
-`eof-reached`, `time-pos`) and the reconnect watchdog (LIVE/WAITING/ERROR, retry
-every 2 s after 1.5 s without data, never gives up). Dark UI is a port of the
-WebStage theme (palette + owner-drawn controls + tray menu).
+### Why not the alternatives
 
-## OBS-side settings (context)
+- **Spout2** — zero-latency video but no audio transport; you'd rebuild the audio path anyway.
+- **NDI (DistroAV)** — 150 ms–2 s and CPU-heavy; same latency class as the old UDP/RTSP pipeline.
+- **Reparenting an OBS projector** (`SetParent`) — resets OBS's DPI awareness and breaks input handling.
+- **obs-websocket** — screenshots only, no live video.
 
-Direct mode server string: `udp://127.0.0.1:1234?pkt_size=1316` (stream key ignored).
-Relay mode Aitum destination: Custom RTMP `rtmp://127.0.0.1:1935/discord`.
+## Known limitations
 
-Encoder settings for low latency (OBS → Output → Streaming):
+- Discord captures **all** of OBS's audio: monitoring on sources mixes into the share (wizard warns).
+- If no spare audio endpoint exists, the plugin falls back to the default device — you'll hear the mix locally until you pick another device in settings.
+- Hotkeys live in OBS's own hotkey system (by design — they work anywhere in OBS and are registered/unregistered with the window's lifecycle).
 
-| Setting           | x264                    | NVENC                      |
-|-------------------|-------------------------|----------------------------|
-| Rate control      | CBR                     | CBR                        |
-| Bitrate           | 6000–8000 kbps @1080p60 | 8000 kbps                  |
-| Keyframe interval | 1 s                     | 1 s                        |
-| Preset            | veryfast                | P4                         |
-| Custom options    | `tune=zerolatency`      | Psycho Visual Tuning ON, Look-ahead OFF |
-| Audio             | AAC 48 kHz stereo, 160–192 kbps | same              |
+## History
 
-## Discord sharing
-
-1. Join a voice channel → **Share your screen** → **Application Window** → pick
-   Backcast (title shows `🔴 <name> — LIVE · Backcast`, easy to spot).
-2. Toggle **Sound** ON; pick 1080p60 (Nitro) or 720p30.
-3. Alternative: Discord → Game Activity → register `Backcast.exe` → Go Live as a game.
-
-Audio fallback mode (`voiceCable`, set in Settings): app renders into VB-Cable Input,
-Discord's input device is `CABLE Output` with noise suppression/echo/AGC off and manual
-sensitivity fully open — then share with the Sound toggle **OFF** (audio rides the voice
-channel). Don't run both modes at once.
-
-## Latency budget (direct path)
-
-| Stage | Typical |
-|---|---|
-| OBS encode | 30–120 ms |
-| MPEG-TS mux + UDP | 50–150 ms |
-| mpv demux + decode | 150–400 ms |
-| Discord delivery | 500–1500 ms |
-| **End-to-end for friends** | **~1–2.5 s** |
-
-## Deviations from the original build spec
-
-1. **libmpv source**: official `mpv-player/mpv` releases don't ship a dev package;
-   `tools/fetch-libmpv.ps1` pulls `mpv-dev-x86_64` from `shinchiro/mpv-winbuild-cmake`.
-   The DLL is named `libmpv-2.dll` (not `mpv-2.dll` as the spec assumed).
-2. **`demuxer-lavf-o` syntax**: spec's colon separators are invalid — mpv key-value
-   list options are comma-separated. Fixed in code.
-3. **`probesize`**: spec's 32768 is ~40 ms of data at 6 Mbps 1080p60 (demuxer can't
-   reach the first keyframe — every loadfile failed). App uses
-   `probesize=5000000,analyzeduration=2000000`.
-4. **Event IDs**: constants follow `include/mpv/client.h`
-   (`MPV_EVENT_PROPERTY_CHANGE=22`, etc.).
-5. **Audio-device timing**: set right after `mpv_initialize` (audio-device-list only
-   exists then), not before; runtime switching via `set audio-device` per spec.
-6. **v1.1 redesign per user request**: single-file self-contained exe (libmpv bundled),
-   first-run wizard replaces manual configuration, MediaMTX relay downloaded and
-   managed automatically for the Aitum path, VB-Cable one-click installer, tray menu.
-   No JSON hand-editing; settings file is internal-only. The spec's raw
-   `extraMpvOptions` escape hatch lives under Settings → Advanced.
-
-## Out of scope
-
-obs-websocket Phase 2, virtual audio drivers (VB-Cable covers that), Discord bots,
-browser/Electron stacks, OBS plugin development, session-mixer automation.
+- **v0.1** — UDP/RTSP + mpv player, WebStage UI, wizard, relay.
+- **v0.2** — latency work, global hotkeys, clean share; confirmed pipeline floor ~1.5 s.
+- **v0.3** — OBS plugin architecture: ~1 frame video, in-process master-mix audio, start/stop with zero idle cost, portable support. The exe becomes installer/config UI.
