@@ -53,12 +53,6 @@ char *bca_pick_spare_endpoint(void);
 /* Id of the endpoint actually in use (malloc'd UTF-8). */
 char *bca_current_endpoint(const struct bc_audio *a);
 
-/* Discord sound-share detection: true while our render client's
- * ReleaseBuffer appears hooked. */
-bool bca_render_hooked(struct bc_audio *a);
-
-/* Calibration helper: current first 16 bytes of ReleaseBuffer. */
-void bca_render_hook_bytes(const struct bc_audio *a, unsigned char out[16]);
 
 #ifdef __cplusplus
 }

@@ -65,11 +65,6 @@ struct bc_audio {
 	IAudioRenderClient *render;
 	UINT32 buffer_frames;
 
-	/* hook detector: Discord's audio hook patches the render client's
-	 * ReleaseBuffer (inline jmp) while a sound share captures us */
-	bool hook_valid;
-	void *hook_fn;                 /* ReleaseBuffer address at snapshot */
-	unsigned char hook_baseline[16];
 };
 
 /* ---- helpers ---- */
@@ -378,15 +373,6 @@ static DWORD WINAPI render_thread(LPVOID param)
 		goto done;
 	}
 
-	/* baseline for hook detection: first bytes of ReleaseBuffer
-	 * (vtable slot 4: IUnknown 0-2, GetBuffer 3, ReleaseBuffer 4) */
-	{
-		void **vt = *(void ***)a->render;
-		a->hook_fn = vt[4];
-		memcpy(a->hook_baseline, a->hook_fn, 16);
-		a->hook_valid = true;
-	}
-
 	blog(LOG_INFO, "[bca] WASAPI stream up: %u frames buffer", buf_frames);
 
 	/* pre-fill silence so the stream starts flowing */
@@ -442,28 +428,6 @@ done:
 	if (com)
 		CoUninitialize();
 	return 0;
-}
-
-/* true while the render client appears hooked (Discord's sound share) */
-bool bca_render_hooked(struct bc_audio *a)
-{
-	if (!a || !a->hook_valid || !a->running || !a->render)
-		return false;
-	void **vt = *(void ***)a->render;
-	if (vt[4] != a->hook_fn)
-		return true; /* vtable swapped entirely */
-	return memcmp(a->hook_fn, a->hook_baseline, 16) != 0;
-}
-
-/* debug: current first bytes, for calibration logs */
-void bca_render_hook_bytes(const struct bc_audio *a, unsigned char out[16])
-{
-	if (!a || !a->hook_valid || !a->render) {
-		memset(out, 0, 16);
-		return;
-	}
-	void **vt = *(void ***)a->render;
-	memcpy(out, vt[4], 16);
 }
 
 /* ---- lifecycle ---- */

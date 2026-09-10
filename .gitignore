@@ -1,12 +1,17 @@
-bin/
-obj/
-*.user
-.vs/
-src/Backcast/libmpv/
-auto.crt
-auto.key
-*.crt
-*.key
-plugin/build_x64/
-plugin/.deps/
+# build outputs
 plugin/build*/
+plugin/.deps/
+src/Backcast/bin/
+src/Backcast/obj/
+releases/
+
+# IDE / local
+.vs/
+*.user
+.zcode/
+releases/
+tools/
+
+# docs except the repo README
+*.md
+!README.md

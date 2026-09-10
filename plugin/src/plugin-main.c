@@ -26,7 +26,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <psapi.h>
-#include <tlhelp32.h>
+
 #include <math.h>
 #include <string.h>
 #include "plugin-support.h"
@@ -72,12 +72,14 @@ static struct {
 	bool pulse;     /* OFF-AIR LED pulse phase */
 	bool hover_pin, hover_min, hover_close; /* header button hover */
 	bool menu_tracking;
+	bool dragging;     /* modal move/size loop active — skip periodic work */
 	bool header_shown; /* header overlay currently revealed (clean share when false) */
 	bool rehide_pending;
 } bcp;
 
 static void bcp_stop(void);
 static void bcp_teardown(bool user_closed);
+static void bcp_set_topmost(HWND frame, bool on);
 static void open_context_menu(HWND hwnd, POINT pt);
 
 /* master mix tap: OBS converts to interleaved float stereo 48 kHz for us */
@@ -223,13 +225,12 @@ static void update_window_title(void)
 		InvalidateRect(bcp.header, NULL, FALSE);
 }
 
-/* LIVE / OFF-AIR pill. WGC gives no notification when a share attaches, and
- * on this machine the yellow capture border is not drawn either (calibration
- * showed only dark pixels). The signal that DOES toggle: Discord's sound
- * share patches our IAudioRenderClient's ReleaseBuffer with an inline hook —
- * bca_render_hooked() compares the function's first bytes against the
- * pristine snapshot taken when the audio stream started. The border check is
- * kept as a secondary signal, and OBS streaming/recording is OR-ed in. */
+/* LIVE / OFF-AIR pill. WGC gives no notification to the captured window;
+ * the yellow capture border is only drawn on some Windows configurations.
+ * What IS observable: Discord's sound share injects DiscordHook64.dll into
+ * this process (sticky — it never unloads, so this is 'attached at least
+ * once'). The border check covers Windows configs that draw it, and OBS
+ * streaming/recording is OR-ed in as the always-truthful signal. */
 static bool is_border_yellow(COLORREF c)
 {
 	int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
@@ -267,147 +268,6 @@ static bool capture_border_active(HWND frame)
 	return found;
 }
 
-/* CALIBRATION pass 3: the share indicator is not a titled window. Watch
- * instead (a) every MODULE loaded in this process (a second Discord DLL
- * may load/unload per share), (b) THREADS whose start address lies inside
- * a Discord module (the hook spawns capture threads while sharing). Log
- * both on change — one of them is the share on/off signal. */
-struct dw_enum {
-	wchar_t digest[4096];
-	size_t len;
-};
-
-/* thread start address query (undocumented but stable) */
-typedef NTSTATUS (WINAPI *pqsa_t)(HANDLE, int, PVOID, ULONG, PULONG);
-static pqsa_t p_qsa;
-
-struct disc_range {
-	HMODULE base;
-	size_t size;
-};
-
-static BOOL CALLBACK discord_win_cb(HWND h, LPARAM lp)
-{
-	struct dw_enum *d = (struct dw_enum *)lp;
-	DWORD pid = 0;
-	GetWindowThreadProcessId(h, &pid);
-	if (!IsWindowVisible(h) || pid == 0)
-		return TRUE;
-	HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-	if (!proc)
-		return TRUE;
-	wchar_t exe[MAX_PATH];
-	DWORD exe_len = MAX_PATH;
-	bool is_discord = false;
-	if (QueryFullProcessImageNameW(proc, 0, exe, &exe_len)) {
-		_wcslwr(exe);
-		if (wcsstr(exe, L"\\discord"))
-			is_discord = true;
-	}
-	CloseHandle(proc);
-	if (!is_discord)
-		return TRUE;
-	wchar_t title[128];
-	int n = GetWindowTextW(h, title, 128);
-	if (n <= 0)
-		return TRUE;
-	wchar_t cls[64];
-	GetClassNameW(h, cls, 64);
-	_snwprintf(d->digest + d->len, (sizeof(d->digest) / 2) - d->len - 1,
-		   L"[%ls|%ls] ", cls, title);
-	d->len = wcslen(d->digest);
-	return TRUE;
-}
-
-static void discord_calib_tick(void)
-{
-	/* (a) module list digest + Discord module ranges */
-	HMODULE mods[1024];
-	DWORD cb = 0;
-	if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &cb))
-		return;
-	DWORD n = cb / sizeof(HMODULE);
-	if (n > 1024)
-		n = 1024;
-
-	static wchar_t last_mods[4096] = L"";
-	static struct disc_range ranges[64];
-	static int nranges = 0;
-	wchar_t mod_digest[4096] = L"";
-	size_t ml = 0;
-	nranges = 0;
-
-	for (DWORD i = 0; i < n; i++) {
-		wchar_t path[MAX_PATH];
-		if (!GetModuleFileNameW(mods[i], path, MAX_PATH))
-			continue;
-		wchar_t low[MAX_PATH];
-		wcsncpy(low, path, MAX_PATH - 1);
-		low[MAX_PATH - 1] = 0;
-		_wcslwr(low);
-		bool disc = wcsstr(low, L"\\discord") != NULL;
-		if (disc && nranges < 64) {
-			MODULEINFO mi;
-			if (GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) {
-				ranges[nranges].base = mods[i];
-				ranges[nranges].size = mi.SizeOfImage;
-				nranges++;
-			}
-			const wchar_t *name = wcsrchr(path, L'\\');
-			name = name ? name + 1 : path;
-			_snwprintf(mod_digest + ml, 2048 - ml - 1, L"[%ls] ", name);
-			ml = wcslen(mod_digest);
-		}
-	}
-	if (wcscmp(mod_digest, last_mods) != 0) {
-		char utf8[4096];
-		WideCharToMultiByte(CP_UTF8, 0, mod_digest, -1, utf8, sizeof(utf8), NULL, NULL);
-		blog(LOG_INFO, "[bcp] calib discord modules: %s", utf8);
-		wcsncpy(last_mods, mod_digest, 4095);
-	}
-
-	/* (b) threads whose start address is inside a Discord module */
-	if (!p_qsa) {
-		HMODULE nt = GetModuleHandleW(L"ntdll.dll");
-		if (nt)
-			p_qsa = (pqsa_t)GetProcAddress(nt, "NtQueryInformationThread");
-	}
-	if (!p_qsa || nranges == 0)
-		return;
-
-	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-	if (snap == INVALID_HANDLE_VALUE)
-		return;
-	THREADENTRY32 te = { .dwSize = sizeof(te) };
-	DWORD mypid = GetCurrentProcessId();
-	int disc_threads = 0;
-	if (Thread32First(snap, &te)) {
-		do {
-			if (te.th32OwnerProcessID != mypid)
-				continue;
-			HANDLE th = OpenThread(THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
-			if (!th)
-				continue;
-			void *start = NULL;
-			ULONG ret = 0;
-			if (p_qsa(th, 9 /* ThreadQuerySetWin32StartAddress */, &start, sizeof(start), &ret) == 0 &&
-			    start) {
-				for (int r = 0; r < nranges; r++) {
-					if ((uintptr_t)start >= (uintptr_t)ranges[r].base &&
-					    (uintptr_t)start < (uintptr_t)ranges[r].base + ranges[r].size) {
-						disc_threads++;
-						break;
-					}
-				}
-			}
-			CloseHandle(th);
-		} while (Thread32Next(snap, &te));
-	}
-	CloseHandle(snap);
-
-	static int last_threads = -1;
-}
-
 /* Discord's injected hook DLL — appears when a sound share attaches.
  * It never unloads, so this detects 'attached at least once'; the thread
  * and module calibration above is the path to a true on/off signal. */
@@ -433,13 +293,12 @@ static bool discord_hook_loaded(void)
 
 static void live_tick(void)
 {
+	if (bcp.dragging)
+		return; /* keep the modal move loop smooth */
 	HWND frame = bcp.window;
 	bool live = obs_frontend_streaming_active() || obs_frontend_recording_active() ||
 		    (frame ? capture_border_active(frame) : false) ||
-		    bca_render_hooked(bcp.audio) ||
 		    discord_hook_loaded();
-
-	discord_calib_tick();
 
 	if (live != bcp.live) {
 		bcp.live = live;
@@ -458,8 +317,11 @@ static void paint_header(HWND hwnd, HDC dc)
 	HBRUSH panel = CreateSolidBrush(ColPanel);
 	FillRect(dc, &rc, panel);
 
-	/* icon (24px, like the app's own header) + LIVE pill + title */
-	HICON icon = LoadIconW(bcp_module(), MAKEINTRESOURCEW(IDR_APPICON));
+	/* icon (24px, like the app's own header) + LIVE pill + title — the
+	 * HICON is cached; LoadIconW on every paint (650ms pulse) was waste */
+	static HICON icon = NULL;
+	if (!icon)
+		icon = LoadIconW(bcp_module(), MAKEINTRESOURCEW(IDR_APPICON));
 	if (icon)
 		DrawIconEx(dc, 10, (rc.bottom - 24) / 2, icon, 24, 24, 0, NULL, DI_NORMAL);
 	SetBkMode(dc, TRANSPARENT);
@@ -619,15 +481,17 @@ static LRESULT CALLBACK header_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		header_buttons(rc.right, &pinR, &minR, &closeR);
 		if (PtInRect(&pinR, pt)) {
 			bool on = !(GetWindowLongW(bcp.window, GWL_EXSTYLE) & WS_EX_TOPMOST);
-			SetWindowPos(bcp.window, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-				     SWP_NOMOVE | SWP_NOSIZE);
+			bcp_set_topmost(bcp.window, on);
 			InvalidateRect(hwnd, NULL, FALSE);
 		} else if (PtInRect(&minR, pt)) {
 			ShowWindow(bcp.window, SW_MINIMIZE);
 		} else if (PtInRect(&closeR, pt)) {
 			PostMessage(bcp.window, WM_CLOSE, 0, 0);
 		} else {
-			/* rest of the strip drags the window */
+			/* rest of the strip drags the window: activate the frame
+			 * first — a real caption click would, a synthetic
+			 * WM_NCLBUTTONDOWN does not, leaving the window behind */
+			SetForegroundWindow(bcp.window);
 			ReleaseCapture();
 			SendMessageW(bcp.window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
 		}
@@ -1129,7 +993,7 @@ static void open_context_menu(HWND hwnd, POINT pt)
 
 	if (cmd == 1) {
 		bool on = !(GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST);
-		SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		bcp_set_topmost(hwnd, on);
 	} else if (cmd == 2) {
 		PostMessage(hwnd, WM_CLOSE, 0, 0);
 	} else if (cmd == 3) {
@@ -1174,10 +1038,25 @@ static void set_header(HWND frame, bool show)
 	if (show) {
 		RECT wr;
 		GetWindowRect(frame, &wr);
-		/* topmost while shown (no activation): the popup must sit above
-		 * everything to be visible, but must never steal focus or raise
-		 * the BackCast window's owner chain */
-		SetWindowPos(bcp.header, HWND_TOPMOST, wr.left, wr.top,
+		/* sit directly ABOVE the frame in z-order — never globally
+		 * topmost unless the frame itself is. A topmost header would
+		 * float over windows that cover the BackCast window. */
+		HWND after;
+		if (GetWindowLongW(frame, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+			after = HWND_TOPMOST;
+		} else {
+			after = GetWindow(frame, GW_HWNDPREV); /* window above frame */
+			/* the header itself may BE that window (it stays directly
+			 * above the frame once created) — look one further up, or
+			 * SetWindowPos(header, header, ...) is invalid and the
+			 * reveal silently fails */
+			if (after == bcp.header)
+				after = GetWindow(bcp.header, GW_HWNDPREV);
+			if (after == NULL || after == frame || after == bcp.header ||
+			    (GetWindowLongW(after, GWL_EXSTYLE) & WS_EX_TOPMOST))
+				after = HWND_TOP; /* top of the non-topmost band */
+		}
+		SetWindowPos(bcp.header, after, wr.left, wr.top,
 			     wr.right - wr.left, HEADER_H,
 			     SWP_NOACTIVATE | SWP_SHOWWINDOW);
 	} else {
@@ -1185,8 +1064,34 @@ static void set_header(HWND frame, bool show)
 	}
 }
 
+/* pin/unpin. Unpinning with a plain HWND_NOTOPMOST lands the window at
+ * the TOP of the non-topmost band — still covering whatever the user is
+ * looking at, which reads as 'still pinned'. Push it below the current
+ * foreground window instead. */
+static void bcp_set_topmost(HWND frame, bool on)
+{
+	if (on) {
+		SetWindowPos(frame, HWND_TOPMOST, 0, 0, 0, 0,
+			     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	} else {
+		SetWindowPos(frame, HWND_NOTOPMOST, 0, 0, 0, 0,
+			     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		HWND fg = GetForegroundWindow();
+		if (fg && fg != frame)
+			SetWindowPos(frame, fg, 0, 0, 0, 0,
+				     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
+	/* the header popup must follow the frame into/out of the topmost band */
+	if (bcp.header_shown) {
+		bcp.header_shown = false;
+		set_header(frame, true);
+	}
+}
+
 static void hover_tick(HWND frame)
 {
+	if (bcp.dragging)
+		return; /* re-shows via this tick right after WM_EXITSIZEMOVE */
 	RECT wr;
 	GetWindowRect(frame, &wr);
 	POINT pt;
@@ -1388,14 +1293,28 @@ static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_MOVE:
-		/* keep the header popup glued to the frame while dragging */
+		/* keep the header popup glued to the frame while dragging —
+		 * SWP_NOSIZE keeps this cheap (fires every pixel of the drag) */
 		if (bcp.header_shown && bcp.header) {
 			RECT wr;
 			GetWindowRect(hwnd, &wr);
-			SetWindowPos(bcp.header, NULL, wr.left, wr.top,
-				     wr.right - wr.left, HEADER_H,
-				     SWP_NOZORDER | SWP_NOACTIVATE);
+			SetWindowPos(bcp.header, NULL, wr.left, wr.top, 0, 0,
+				     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 		}
+		return 0;
+
+	case WM_ENTERSIZEMOVE:
+		bcp.dragging = true;
+		/* dragging by the header had the header visible: repositioning it
+		 * every WM_MOVE pixel is a cross-window SetWindowPos that forces
+		 * DWM sync (the drag lag). Hide it for the drag; the hover tick
+		 * brings it back on release (the hand is still in the zone). */
+		if (bcp.header_shown)
+			set_header(hwnd, false);
+		return 0;
+
+	case WM_EXITSIZEMOVE:
+		bcp.dragging = false;
 		return 0;
 
 	case WM_TIMER:
@@ -1429,7 +1348,10 @@ static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			return 0;
 		}
 		if (wp == 5) {
-			/* v0.2 pill animation: the OFF-AIR LED pulses; LIVE is steady */
+			/* v0.2 pill animation: the OFF-AIR LED pulses; LIVE is
+			 * steady. No repaints mid-drag (modal loop smoothness) */
+			if (bcp.dragging)
+				return 0;
 			if (bcp.live) {
 				if (!bcp.pulse) {
 					bcp.pulse = true;
@@ -1813,8 +1735,7 @@ static void hk_toggle_topmost(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey
 	if (!pressed || !bcp.open || !bcp.window)
 		return;
 	bool on = !(GetWindowLongW(bcp.window, GWL_EXSTYLE) & WS_EX_TOPMOST);
-	SetWindowPos(bcp.window, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-		     SWP_NOMOVE | SWP_NOSIZE);
+	bcp_set_topmost(bcp.window, on);
 }
 
 /* ------------------------------------------------------------------ */
