@@ -62,6 +62,8 @@ Everything is configurable from the window's right-click menu — no app require
 ## Features
 
 - ~1-frame program video, master-mix audio, one window share
+- Top-level **BackCast** button in the OBS menu bar — no submenu digging
+- The app installs the latest plugin straight from GitHub and prompts when a newer one is out (your settings always survive)
 - Zero resource usage while closed
 - Clean share: hover-reveal header, constant branding in the title
 - Aspect-locked resizing (no letterbox bars), auto-refit on canvas changes
