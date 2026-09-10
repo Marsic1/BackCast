@@ -24,6 +24,10 @@ function Step($msg) { Write-Host "`n== $msg" -ForegroundColor Cyan }
 if (-not $SkipBuild) {
     Step "Build the OBS plugin"
     Push-Location (Join-Path $root "plugin")
+    # reconfigure first: the version from buildspec.json is only read at
+    # configure time, so a version bump alone would build a stale stamp
+    cmake --preset windows-x64
+    if ($LASTEXITCODE -ne 0) { throw "plugin configure failed" }
     cmake --build --preset windows-x64 --config Release
     if ($LASTEXITCODE -ne 0) { throw "plugin build failed" }
     Pop-Location

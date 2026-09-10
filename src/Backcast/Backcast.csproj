@@ -12,7 +12,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>0.5.2</Version>
+    <Version>0.6.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
     <!-- One-file release: runtime only — the OBS plugin is downloaded from
