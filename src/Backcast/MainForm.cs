@@ -5,8 +5,9 @@ namespace Backcast;
 /// <summary>
 /// Control window for the plugin architecture: shows install state (OBS
 /// found, plugin installed, audio endpoint) and offers install/repair and
-/// settings. The actual video window lives inside OBS (Tools → Backcast
-/// window) — this exe just keeps the plugin healthy.
+/// settings. The actual video window lives inside OBS (the BackCast button
+/// in its menu bar) — this exe just keeps the plugin healthy: it downloads
+/// the latest plugin from GitHub and prompts when an update is available.
 /// </summary>
 internal sealed class MainForm : Form
 {
@@ -73,7 +74,7 @@ internal sealed class MainForm : Form
         _usage.ForeColor = Theme.Gray;
         _usage.TextAlign = ContentAlignment.MiddleLeft;
         _usage.Bounds = new Rectangle(Edge, y, ClientSize.Width - Edge * 2, 64);
-        _usage.Text = "In OBS:  Tools → BackCast window  (or assign a hotkey in OBS Settings → Hotkeys).\n" +
+        _usage.Text = "In OBS:  the BackCast button in the menu bar  (or assign a hotkey in OBS Settings → Hotkeys).\n" +
                       "In Discord:  share the \"BackCast\" window with sound — it carries both video and audio.\n" +
                       "Close the BackCast window in OBS when you're done: it uses no resources while closed.";
         Controls.Add(_usage);
@@ -97,6 +98,7 @@ internal sealed class MainForm : Form
                 _settings.Save();
             }
             RefreshState();
+            CheckForUpdateAsync(); // the wizard already installed the latest on first run
         };
     }
 
@@ -186,7 +188,10 @@ internal sealed class MainForm : Form
             _settings.Save();
             _obsValue.Text = _obs.Title;
             _obsValue.ForeColor = Theme.Fg;
-            _pluginValue.Text = _obs.IsInstalled ? "installed ✓" : "not installed";
+            var installedVersion = PluginInstaller.GetInstalledVersion(_obs);
+            _pluginValue.Text = _obs.IsInstalled
+                ? installedVersion == null ? "installed ✓" : $"installed ✓  {installedVersion}"
+                : "not installed";
             _pluginValue.ForeColor = _obs.IsInstalled ? Theme.Accent : Theme.Stop;
             if (endpointId == null)
             {
@@ -215,9 +220,32 @@ internal sealed class MainForm : Form
             RefreshState();
             return;
         }
+
+        var installed = PluginInstaller.GetInstalledVersion(_obs);
+        if (MessageBox.Show(this,
+                $"Reinstall the BackCast plugin?\n\n" +
+                "The latest version will be downloaded from GitHub. " +
+                "Your audio device and window title settings are kept.\n" +
+                "If OBS is running, close it first.",
+                "BackCast — repair install",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        RunInstall(installed == null ? "Reinstalling…" : $"Reinstalling {installed}…");
+    }
+
+    /// <summary>Downloads + installs the plugin on a worker thread; the UI
+    /// thread only shows progress and the result.</summary>
+    private async void RunInstall(string progressText)
+    {
+        if (_obs == null) return;
+        var obs = _obs;
+        _installButton.Enabled = false;
+        _installButton.Text = progressText;
         try
         {
-            PluginInstaller.Install(_obs);
+            await PluginInstaller.InstallAsync(obs);
+            MessageBox.Show(this, "Done — restart OBS if it's running.",
+                "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
@@ -225,6 +253,29 @@ internal sealed class MainForm : Form
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         RefreshState();
+    }
+
+    /// <summary>Background check: if GitHub has a newer plugin than the one
+    /// installed, offer the update. Settings are never touched.</summary>
+    private async void CheckForUpdateAsync()
+    {
+        var obs = _obs;
+        if (obs?.IsInstalled != true) return;
+        var installed = PluginInstaller.GetInstalledVersion(obs);
+        if (installed == null) return;
+        var latest = await PluginInstaller.FetchLatestVersionAsync();
+        if (latest == null || latest <= installed) return;
+        if (IsDisposed) return;
+
+        BeginInvoke(() =>
+        {
+            if (MessageBox.Show(this,
+                    $"BackCast plugin {latest} is available (you have {installed}).\n\n" +
+                    "Update now? Your audio device and window title settings are kept.",
+                    "BackCast — update available",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                RunInstall($"Updating to {latest}…");
+        });
     }
 
     private void OpenSettings()

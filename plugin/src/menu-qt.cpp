@@ -36,7 +36,7 @@ extern "C" void bcp_add_menubar_button(void *main_window, void (*callback)(void 
 		return;
 
 	/* top-level entry: clickable directly in the menu bar, no submenu */
-	QAction *act = bar->addAction(QStringLiteral("BackCast Window"));
+	QAction *act = bar->addAction(QStringLiteral("BackCast"));
 	QObject::connect(act, &QAction::triggered, [callback, private_data]() {
 		callback(private_data);
 	});

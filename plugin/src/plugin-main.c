@@ -1750,7 +1750,7 @@ static void frontend_event(enum obs_frontend_event event, void *private_data)
 	UNUSED_PARAMETER(private_data);
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING: {
-		/* top-level "BackCast Window" button in the OBS menu bar —
+		/* top-level "BackCast" button in the OBS menu bar —
 		 * easier to find than a Tools submenu entry */
 		bcp_add_menubar_button(obs_frontend_get_main_window(), tools_toggle, NULL);
 

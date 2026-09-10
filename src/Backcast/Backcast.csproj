@@ -15,7 +15,8 @@
     <Version>0.5.2</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <!-- One-file release: runtime + the OBS plugin embedded as a resource. -->
+    <!-- One-file release: runtime only — the OBS plugin is downloaded from
+         the latest GitHub release at install time (never stale). -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -28,13 +29,6 @@
   <!-- multi-size app icon: exe icon + embedded resource for tray/titlebar -->
   <ItemGroup>
     <EmbeddedResource Include="app.ico" />
-  </ItemGroup>
-
-  <!-- The OBS plugin payload, embedded and extracted by PluginInstaller.
-       Build the plugin first with its cmake presets (configure + build). -->
-  <ItemGroup>
-    <EmbeddedResource Include="..\..\plugin\build_x64\Release\backcast-projector.dll" Link="assets\backcast-projector.dll" />
-    <EmbeddedResource Include="..\..\plugin\data\locale\en-US.ini" Link="assets\en-US.ini" />
   </ItemGroup>
 
 </Project>

@@ -147,12 +147,22 @@ internal sealed class SettingsForm : Form
         }
     }
 
-    private void Repair()
+    private async void Repair()
     {
         if (_obs == null) return;
+        if (MessageBox.Show(this,
+                "Reinstall the BackCast plugin?\n\n" +
+                "The latest version will be downloaded from GitHub. " +
+                "Your audio device and window title settings are kept.\n" +
+                "If OBS is running, close it first.",
+                "BackCast — repair install",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        var obs = _obs;
+        _repairButton.Enabled = false;
         try
         {
-            PluginInstaller.Install(_obs);
+            await PluginInstaller.InstallAsync(obs);
             MessageBox.Show(this, "Plugin reinstalled. Restart OBS if it's running.",
                 "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -160,7 +170,11 @@ internal sealed class SettingsForm : Form
         {
             MessageBox.Show(this, ex.Message, "BackCast", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        UpdateObsRow();
+        finally
+        {
+            _repairButton.Enabled = true;
+            UpdateObsRow();
+        }
     }
 
     private void Uninstall()

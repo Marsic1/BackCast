@@ -31,17 +31,17 @@ BackCast is an OBS plugin (with an optional companion app). It opens a window in
 
 ### A. The BackCast app (recommended)
 
-Download `BackCast.exe` from the releases — one file, everything inside, including the plugin.
+Download `BackCast.exe` from the releases — one file, no installer.
 
-1. Run it: the wizard finds your OBS (standard or portable) and installs the plugin.
-2. In OBS: `Tools → BackCast window` (or bind a hotkey in OBS `Settings → Hotkeys`).
+1. Run it: the wizard finds your OBS (standard or portable) and installs the plugin (downloaded from GitHub, always the latest version).
+2. In OBS: press the **BackCast** button in the menu bar (or bind a hotkey in OBS `Settings → Hotkeys`).
 3. In Discord: share the **BackCast** window with **sound on**.
 
-The app also offers a one-click **VB-Cable installer** for machines without a spare audio output, plus a settings window (audio device, window title, repair/uninstall).
+The app also offers a one-click **VB-Cable installer** for machines without a spare audio output, a settings window (audio device, window title, repair/uninstall), and it checks for plugin updates on launch — your audio and title settings survive every update.
 
 ### B. Direct plugin install (plugin managers / manual)
 
-Grab `backcast-projector-<version>-windows-x64.zip` from the releases:
+Grab `backcast-plugin-windows-x64.zip` from the releases (the name is version-less, so `releases/latest/download/backcast-plugin-windows-x64.zip` is a permanent URL):
 
 - **Plugin managers (StreamUP etc.)**: standard plugin layout — point the manager at it.
 - **Standard OBS, manual**: extract, copy the `backcast-projector` folder into `C:\ProgramData\obs-studio\plugins\` (no admin needed).
@@ -51,7 +51,7 @@ Everything is configurable from the window's right-click menu — no app require
 
 ## Using it
 
-- **Open/close**: `Tools → BackCast window`, the hotkeys, or the window's ✕. Closed = free.
+- **Open/close**: the **BackCast** button in OBS's menu bar, the hotkeys, or the window's ✕. Closed = free.
 - **Share**: in Discord, pick the window titled `<your name> - BackCast Off-Air Stream`.
 - **Header**: move your mouse to the top edge of the window — a dark header slides in with the status pill (**LIVE** green / **OFF-AIR** amber, pulsing), the title, always-on-top 📌, minimize, and close. It disappears when you move away, so the Discord share stays clean.
 - **Right-click menu**: always on top, rename the window, **audio device** (side submenu, switches live), canvas info.
@@ -78,11 +78,12 @@ cd plugin
 cmake --preset windows-x64
 cmake --build --preset windows-x64 --config Release
 
-# 2. build/publish the app (embeds the plugin DLL as a resource)
+# 2. publish the app (the plugin is NOT embedded — the app downloads the
+#    latest release zip from GitHub at install time)
 cd ../src/Backcast
 dotnet publish -c Release -r win-x64 --self-contained
 
-# 3. package the plugin zip and verify the exe embeds the fresh plugin
+# 3. package the plugin zip and verify it contains the fresh plugin
 cd ../..
 powershell -File make-release.ps1
 ```

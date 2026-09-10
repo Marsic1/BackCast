@@ -4,8 +4,9 @@ namespace Backcast;
 
 /// <summary>
 /// Setup wizard for the plugin architecture: find OBS (standard or
-/// portable), install the embedded plugin into it, then explain how to open
-/// the BackCast window in OBS and share it in Discord with sound.
+/// portable), download the latest plugin from GitHub and install it into
+/// it, then explain how to open the BackCast window in OBS and share it
+/// in Discord with sound.
 /// </summary>
 internal sealed class FirstRunWizard : Form
 {
@@ -148,15 +149,15 @@ internal sealed class FirstRunWizard : Form
 
     // ---- page 2: install ----
 
-    private void Install()
+    private async void Install()
     {
         if (_chosen == null) return;
         _installButton.Enabled = false;
-        _installStatus.Text = "installing…";
+        _installStatus.Text = "downloading the latest plugin from GitHub…";
         _installStatus.ForeColor = Theme.Amber;
         try
         {
-            PluginInstaller.Install(_chosen);
+            await PluginInstaller.InstallAsync(_chosen);
             _settings.ObsRoot = _chosen.RootPath;
             _installStatus.Text = "installed ✓ — restart OBS if it's running";
             _installStatus.ForeColor = Theme.Accent;
@@ -266,7 +267,7 @@ internal sealed class FirstRunWizard : Form
         _installStatus.Location = new Point(Edge, 160);
         _installStatus.Text = _chosen?.IsInstalled == true
             ? "already installed ✓ — you can continue"
-            : "one file into obs-plugins\\64bit plus its data folder; no admin needed for portable installs";
+            : "downloaded from GitHub into obs-plugins\\64bit; no admin needed for portable installs";
         _installStatus.ForeColor = _chosen?.IsInstalled == true ? Theme.Accent : Theme.Gray;
         Controls.Add(_installStatus);
 
@@ -285,8 +286,8 @@ internal sealed class FirstRunWizard : Form
         PageTitle("You're all set", "One window in OBS carries video + audio for Discord.");
 
         string text =
-            "1.  Open OBS and choose  Tools → BackCast window  (or set a hotkey in\n" +
-            "     OBS Settings → Hotkeys → \"BackCast: toggle window\").\n\n" +
+            "1.  Open OBS and press the  BackCast  button in its menu bar\n" +
+            "     (or set a hotkey in OBS Settings → Hotkeys → \"BackCast: toggle window\").\n\n" +
             "2.  In Discord, share the \"BackCast\" window and enable sound.\n" +
             "     Video is a frame behind your scene; audio is the exact master mix.\n\n" +
             "3.  The plugin plays the mix to an unused audio device so you don't\n" +

@@ -1,12 +1,12 @@
 # Packages the BackCast OBS plugin into the standard layout that plugin
 # managers (StreamUP etc.) and manual installs expect:
 #
-#   backcast-projector-<version>-windows-x64.zip
-#     backcast-projector/
-#       bin/64bit/backcast-projector.dll
-#       data/locale/en-US.ini
+#   backcast-plugin-windows-x64.zip   (name is version-less on purpose: it
+#     backcast-projector/              makes the GitHub "latest download"
+#       bin/64bit/backcast-projector.dll   URL permanent:
+#       data/locale/en-US.ini              github.com/Marsic1/BackCast/releases/latest/download/backcast-plugin-windows-x64.zip)
 #
-# Usage:  powershell -File tools/package-plugin.ps1 [-OutDir releases]
+# Usage:  powershell -File plugin/package-plugin.ps1 [-OutDir releases]
 # The plugin must already be built (cmake --build --preset windows-x64).
 
 param(
@@ -22,10 +22,7 @@ if (-not (Test-Path $dll)) {
     Write-Error "Plugin DLL not found at $dll - build it first:`n  cd plugin; cmake --preset windows-x64; cmake --build --preset windows-x64"
 }
 
-# version from buildspec.json
-$spec = Get-Content (Join-Path $root "plugin\buildspec.json") -Raw | ConvertFrom-Json
-$version = $spec.version
-$zipName = "backcast-projector-$version-windows-x64.zip"
+$zipName = "backcast-plugin-windows-x64.zip"
 
 $stage = Join-Path $env:TEMP "backcast-package"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
